@@ -4,6 +4,7 @@ import re
 import io
 from datetime import time
 from urllib.parse import unquote
+import openpyxl
 
 # ===== PASSWORD GATE =====
 if "authenticated" not in st.session_state:
@@ -21,57 +22,88 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V4.15", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 4.15 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V4.17", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 4.17 - Verwey Vervoer")
 
-st.markdown("**Rules:** 195.03 fills M-F first. Sat/Sun only if M-F short. Sleep out based on ARRIVAL. Geo fence = Middelburg.")
+st.markdown("**Rules:** 195.03 fills M-F first. Sat/Sun only if M-F short. Sleep out from End Location link. Geo fence = Middelburg.")
 
 NORMAL_HOURS_THRESHOLD = 195.03
-GEO_FENCE_KEYWORDS = ['MIDDELBURG', 'STEVE TSHWETE'] # 0 sleep out allowance
+GEO_FENCE_KEYWORDS = ['MIDDELBURG', 'STEVE TSHWETE']
 CROSSBORDER_COUNTRIES = ['ZIMBABWE', 'BOTSWANA', 'NAMIBIA', 'MOZAMBIQUE', 'ZAMBIA', 'DRC', 'LESOTHO', 'ESWATINI', 'MALAWI', 'TANZANIA', 'ANGOLA']
 ABNORMAL_FLEETS = ['FL221', 'FL222', 'FL223', 'FL225', 'FL229', 'FL230', 'FL238']
 
 st.sidebar.subheader("NBCRFLI Settings")
 NORMAL_HOURS_THRESHOLD = st.sidebar.number_input("Normal Hours Threshold", value=195.03, step=0.01)
 st.sidebar.markdown(f"**Abnormal Fleets:** {', '.join(ABNORMAL_FLEETS)}")
+st.sidebar.markdown(f"**Geo Fence:** {', '.join(GEO_FENCE_KEYWORDS)}")
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("1. Upload Tracking Report")
-    tracking_file = st.file_uploader("Must have ARRIVAL column = last location", type=["xlsx", "xls", "csv"], key="tracking")
+    tracking_file = st.file_uploader("First and Last Movement with End Location", type=["xlsx", "xls"], key="tracking")
 
 with col2:
     st.subheader("2. Upload Driver Allocation")
     allocation_file = st.file_uploader("Sheet = Driver, Headers: DAY | DATE | FLEET | MEAL HOUR | SLEEP OUT", type=["xlsx", "xls"], key="allocation")
 
-def find_tracking_header(df_raw):
-    for idx, row in df_raw.iterrows():
-        row_str = ' '.join([str(x).upper() for x in row.values])
-        if 'REGISTRATION' in row_str and 'DEPARTURE' in row_str and 'ARRIVAL' in row_str:
-            return idx
-    return 0
+def extract_location_from_hyperlink(cell):
+    """Extract location from cell value OR hyperlink. Handles Excel links."""
+    if cell.hyperlink:
+        # Use hyperlink target
+        link = str(cell.hyperlink.target).upper()
+    else:
+        link = str(cell.value).upper() if cell.value else ''
 
-def extract_location_from_link(text):
-    """ARRIVAL = last location. Extract from Google Maps link or text"""
-    if pd.isna(text): return ''
-    text = str(text).upper()
-    if 'HTTP' in text or 'GOOGLE.COM/MAPS' in text:
-        match = re.search(r'/PLACE/([^/@]+)', text)
+    if not link or link == 'NONE':
+        return ''
+
+    # Extract from Google Maps URL
+    if 'GOOGLE.COM/MAPS' in link or 'HTTP' in link:
+        match = re.search(r'/PLACE/([^/@]+)', link)
         if match:
             return unquote(match.group(1).replace('+', ' '))
-        match = re.search(r'[?&]Q=([^&]+)', text)
+        match = re.search(r'[?&]Q=([^&]+)', link)
         if match:
             return unquote(match.group(1).replace('+', ' '))
-        return text
-    return text
+    return link
 
-def extract_yard_hours_from_text(text):
-    if pd.isna(text): return 0.0
-    text = str(text).lower()
-    match = re.search(r'(\d+\.?\d*)\s*h(?:our)?s?\s*yard|yard[:\s]*(\d+\.?\d*)', text)
-    if match: return float(match.group(1) or match.group(2))
-    return 0.0
+def read_tracking_with_links(file):
+    """Read tracking file and extract End Location hyperlinks"""
+    wb = openpyxl.load_workbook(file, data_only=True)
+    ws = wb.active
+
+    # Find header row
+    header_row = None
+    for idx, row in enumerate(ws.iter_rows(values_only=True), 1):
+        row_str = ' '.join([str(x).upper() for x in row if x])
+        if 'REGISTRATION' in row_str and 'END LOCATION' in row_str and 'DEPARTURE TIME' in row_str:
+            header_row = idx
+            break
+    if not header_row:
+        header_row = 1
+
+    headers = [str(cell.value).strip() if cell.value else f'Unnamed_{i}' for i, cell in enumerate(ws[header_row])]
+
+    # Find End Location column index
+    end_loc_idx = None
+    for i, h in enumerate(headers):
+        if 'END LOCATION' in h.upper():
+            end_loc_idx = i
+            break
+
+    data = []
+    for row in ws.iter_rows(min_row=header_row + 1):
+        row_data = {}
+        for i, cell in enumerate(row):
+            col_name = headers[i]
+            if i == end_loc_idx:
+                row_data[col_name] = extract_location_from_hyperlink(cell)
+            else:
+                row_data[col_name] = cell.value
+        data.append(row_data)
+
+    return pd.DataFrame(data)
 
 def clean_col_name(col):
     return str(col).strip().lower().replace(':', '').replace('.', '').strip()
@@ -84,11 +116,11 @@ def standardize_columns(df):
         'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time', 'departure': 'Start Time', 'starttime': 'Start Time',
         'end': 'End Time', 'end time': 'End Time', 'arrival time': 'End Time', 'last movement': 'End Time', 'arrival': 'End Time', 'endtime': 'End Time',
         'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number',
-        'reg': 'Fleet Number', 'registration': 'Fleet Number', 'registration nr': 'Fleet Number', 'reg nr': 'Fleet Number', 'fleet number': 'Fleet Number', 'reg no': 'Fleet Number',
+        'reg': 'Fleet Number', 'registration': 'Fleet Number', 'registration nr': 'Fleet Number', 'reg nr': 'Fleet Number', 'fleet number': 'Fleet Number', 'reg no': 'Fleet Number', 'registration nr.': 'Fleet Number',
         'meal hour': 'Meal Hour', 'meal': 'Meal Hour', 'meal hours': 'Meal Hour',
         'sleep out': 'Sleep Out', 'sleep': 'Sleep Out', 'sleepout': 'Sleep Out',
-        'arrival location': 'Arrival', 'arrival town': 'Arrival', 'destination': 'Arrival', 'last location': 'Arrival',
-        'departure location': 'Departure', 'departure town': 'Departure', 'origin': 'Departure'
+        'end location': 'End Location', 'arrival location': 'End Location', 'last location': 'End Location',
+        'start location': 'Start Location', 'departure location': 'Start Location'
     }
     df.columns = [clean_col_name(col) for col in df.columns]
     for old, new in rename_map.items():
@@ -109,36 +141,29 @@ def auto_lunch_deduction(row):
     return 0.0
 
 def classify_sleep_out(row):
-    """Based on ARRIVAL = last location"""
+    """Based on End Location = last location"""
     nights = pd.to_numeric(row.get('Sleep Out', 0), errors='coerce')
     if pd.isna(nights) or nights == 0:
         return 0, 0
 
-    arrival_raw = row.get('Arrival', '')
-    arrival = extract_location_from_link(arrival_raw)
+    location = str(row.get('End Location', '')).upper()
 
-    # Crossborder check first
-    if any(country in arrival for country in CROSSBORDER_COUNTRIES):
-        return 0, nights # local=0, xborder=nights
-
-    # Geo fence = Middelburg only = 0 allowance
-    if any(town in arrival for town in GEO_FENCE_KEYWORDS):
-        return 0, 0
-
-    # Otherwise SA local
-    return nights, 0 # local=nights, xborder=0
+    if any(country in location for country in CROSSBORDER_COUNTRIES):
+        return 0, nights # xborder
+    if any(town in location for town in GEO_FENCE_KEYWORDS):
+        return 0, 0 # geo fence
+    return nights, 0 # local
 
 def is_abnormal(fleet_no):
     return any(fleet_no.startswith(prefix) for prefix in ABNORMAL_FLEETS)
 
 if tracking_file and allocation_file:
     try:
-        # Read files
-        df_track_raw = pd.read_excel(tracking_file, header=None)
-        track_header = find_tracking_header(df_track_raw)
-        df_track = pd.read_excel(tracking_file, header=track_header)
+        # Read tracking with hyperlink support
+        df_track = read_tracking_with_links(tracking_file)
         df_track = standardize_columns(df_track)
 
+        # Read allocation
         xls = pd.ExcelFile(allocation_file)
         all_alloc_dfs = []
 
@@ -155,18 +180,9 @@ if tracking_file and allocation_file:
         df_alloc = pd.concat(all_alloc_dfs, ignore_index=True)
 
         # Date handling
-        if 'Date' not in df_track.columns:
-            if 'Start Time' in df_track.columns:
-                df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce')
-            else:
-                st.error(f"Tracking file missing 'Date' and 'Start Time'. Found: {list(df_track.columns)}")
-                st.stop()
-
-        df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce', dayfirst=True)
+        df_track['Date'] = pd.to_datetime(df_track['Departure Time'], errors='coerce', dayfirst=True)
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], format='%Y %m %d', errors='coerce')
 
-        df_track['Date_dt'] = df_track['Date']
-        df_alloc['Date_dt'] = df_alloc['Date']
         df_track['Date'] = df_track['Date'].dt.strftime('%Y-%m-%d')
         df_alloc['Date'] = df_alloc['Date'].dt.strftime('%Y-%m-%d')
 
@@ -174,46 +190,44 @@ if tracking_file and allocation_file:
         df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip().str.upper()
         df_alloc['Fleet Number'] = df_alloc['Fleet Number'].astype(str).str.strip().str.upper()
 
-        df_track = df_track.dropna(subset=['Fleet Number', 'Date', 'Start Time', 'End Time'])
+        df_track = df_track.dropna(subset=['Fleet Number', 'Date', 'Departure Time', 'Arrival Time'])
         df_alloc = df_alloc.dropna(subset=['Fleet Number', 'Date'])
 
-        if df_alloc.empty:
-            st.error("Allocation data is empty after cleaning.")
-            st.stop()
-
-        df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
+        # CRITICAL: Keep SLEEP OUT from allocation
+        df_merged = pd.merge(df_track, df_alloc[['Fleet Number', 'Date', 'Sleep Out', 'Meal Hour']], on=['Fleet Number', 'Date'], how='inner')
 
         if df_merged.empty:
-            st.error("No matching rows.")
+            st.error("No matching rows between files.")
             st.stop()
 
         # ===== HOURS CALCULATION =====
-        df_merged['Start Time'] = pd.to_datetime(df_merged['Start Time'], errors='coerce')
-        df_merged['End Time'] = pd.to_datetime(df_merged['End Time'], errors='coerce')
+        df_merged['Start Time'] = pd.to_datetime(df_merged['Departure Time'], errors='coerce')
+        df_merged['End Time'] = pd.to_datetime(df_merged['Arrival Time'], errors='coerce')
         df_merged['gross_hours'] = (df_merged['End Time'] - df_merged['Start Time']).dt.total_seconds() / 3600
 
         df_merged['meal_hour'] = df_merged.apply(auto_lunch_deduction, axis=1)
 
-        # Sleep out based on ARRIVAL = last location
+        # Sleep out based on End Location
+        df_merged['SLEEP OUT RAW'] = pd.to_numeric(df_merged.get('Sleep Out', 0), errors='coerce').fillna(0)
         sleep_data = df_merged.apply(classify_sleep_out, axis=1, result_type='expand')
         df_merged['sleep_out_local'] = sleep_data[0]
         df_merged['sleep_out_crossborder'] = sleep_data[1]
 
-        # Yard hours from text only
+        # Yard hours
         if 'Activity Description' in df_merged.columns:
-            df_merged['yard_hours'] = df_merged['Activity Description'].apply(extract_yard_hours_from_text)
+            df_merged['yard_hours'] = df_merged['Activity Description'].apply(lambda x: extract_yard_hours_from_text(str(x)))
         else:
             df_merged['yard_hours'] = 0.0
 
         df_merged['total_hours'] = (df_merged['gross_hours'] - df_merged['meal_hour']).clip(lower=0)
         df_merged['driving_hours'] = (df_merged['total_hours'] - df_merged['yard_hours']).clip(lower=0)
 
-        df_merged['weekday'] = pd.to_datetime(df_merged['Date']).dt.dayofweek # 0=Mon, 5=Sat, 6=Sun
+        df_merged['weekday'] = pd.to_datetime(df_merged['Date']).dt.dayofweek
         df_merged['is_abnormal'] = df_merged['Fleet Number'].apply(is_abnormal)
 
         df_merged = df_merged.sort_values(['Employee Name', 'Date', 'Start Time'])
 
-        # ===== FIXED 195.03 LOGIC: CAP M-F AT 195.03 =====
+        # ===== FIXED 195.03 LOGIC: M-F CAP FIRST =====
         df_merged['normal_weekday'] = 0.0
         df_merged['normal_sat'] = 0.0
         df_merged['normal_sun'] = 0.0
@@ -223,45 +237,38 @@ if tracking_file and allocation_file:
 
         for driver in df_merged['Employee Name'].unique():
             driver_mask = df_merged['Employee Name'] == driver
-            driver_df = df_merged[driver_mask].copy()
 
-            # Step 1: Calculate cumulative M-F and cap at 195.03
-            mf_mask = driver_df['weekday'] < 5
-            mf_cumsum = driver_df.loc[mf_mask, 'total_hours'].cumsum()
+            # PASS 1: Process ALL Mon-Fri and cap at 195.03
+            mf_mask = driver_mask & (df_merged['weekday'] < 5)
+            mf_indices = df_merged[mf_mask].index
+            mf_cumsum = 0.0
 
-            for idx in driver_df[mf_mask].index:
-                row_pos = driver_df.index.get_loc(idx)
-                prev_mf_sum = driver_df.loc[mf_mask].iloc[:row_pos]['total_hours'].sum() if row_pos > 0 else 0
-                hours_today = driver_df.at[idx, 'total_hours']
-
-                normal_today = min(hours_today, max(0, NORMAL_HOURS_THRESHOLD - prev_mf_sum))
+            for idx in mf_indices:
+                hours_today = df_merged.at[idx, 'total_hours']
+                can_take_normal = max(0, NORMAL_HOURS_THRESHOLD - mf_cumsum)
+                normal_today = min(hours_today, can_take_normal)
                 ot_today = hours_today - normal_today
-
                 df_merged.at[idx, 'normal_weekday'] = normal_today
                 df_merged.at[idx, 'ot_weekday'] = ot_today
+                mf_cumsum += normal_today
 
-            # Step 2: Check how much normal is still needed after M-F
-            total_normal_mf = df_merged.loc[driver_mask & (df_merged['weekday'] < 5), 'normal_weekday'].sum()
-            normal_remaining = max(0, NORMAL_HOURS_THRESHOLD - total_normal_mf)
-
-            # Step 3: Use Saturday to fill remaining normal
+            # PASS 2: Saturday fills remaining normal
+            normal_remaining = max(0, NORMAL_HOURS_THRESHOLD - mf_cumsum)
             sat_mask = driver_mask & (df_merged['weekday'] == 5)
             for idx in df_merged[sat_mask].index:
                 hours_today = df_merged.at[idx, 'total_hours']
                 normal_today = min(hours_today, normal_remaining)
                 ot_today = hours_today - normal_today
-
                 df_merged.at[idx, 'normal_sat'] = normal_today
                 df_merged.at[idx, 'ot_sat'] = ot_today
                 normal_remaining -= normal_today
 
-            # Step 4: Use Sunday to fill any remaining normal
+            # PASS 3: Sunday fills any remaining normal
             sun_mask = driver_mask & (df_merged['weekday'] == 6)
             for idx in df_merged[sun_mask].index:
                 hours_today = df_merged.at[idx, 'total_hours']
                 normal_today = min(hours_today, normal_remaining)
                 ot_today = hours_today - normal_today
-
                 df_merged.at[idx, 'normal_sun'] = normal_today
                 df_merged.at[idx, 'ot_sun'] = ot_today
                 normal_remaining -= normal_today
@@ -314,8 +321,8 @@ if tracking_file and allocation_file:
         st.subheader(f"Summary - M-F caps at {NORMAL_HOURS_THRESHOLD}h")
         st.dataframe(driver_totals.round(2))
 
-        st.subheader("All Trips")
-        display_cols = ['Date', 'Employee Name', 'Fleet Number', 'is_abnormal', 'Arrival', 'weekday', 'Start Time', 'End Time',
+        st.subheader("All Trips - Check End Location + SLEEP OUT RAW")
+        display_cols = ['Date', 'Employee Name', 'Fleet Number', 'is_abnormal', 'End Location', 'SLEEP OUT RAW', 'weekday', 'Start Time', 'End Time',
                        'total_hours', 'normal_weekday', 'normal_sat', 'normal_sun',
                        'ot_weekday', 'ot_sat', 'ot_sun', 'total_ot_15', 'yard_hours', 'meal_hour',
                        'sleep_out_local', 'sleep_out_crossborder']
@@ -348,7 +355,7 @@ if tracking_file and allocation_file:
         output.seek(0)
 
         st.download_button(
-            "📥 Download Excel - Fixed 195.03 Cap",
+            "📥 Download Excel - V4.17",
             output,
             "fleet_timesheet_processed.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
