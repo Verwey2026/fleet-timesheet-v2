@@ -48,6 +48,10 @@ def extract_yard_hours(text):
     if match: return float(match.group(1) or match.group(2))
     return 0.0
 
+def clean_col_name(col):
+    # Remove :, ., extra spaces, make lowercase
+    return str(col).strip().lower().replace(':', '').replace('.', '').strip()
+
 def standardize_columns(df):
     rename_map = {
         'date': 'Date', 'trip date': 'Date',
@@ -56,11 +60,13 @@ def standardize_columns(df):
         'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time',
         'end': 'End Time', 'end time': 'End Time', 'arrival time': 'End Time', 'last movement': 'End Time',
         'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number', 
-        'reg': 'Fleet Number', 'registration': 'Fleet Number', 'registration nr': 'Fleet Number', 'reg nr': 'Fleet Number', 'reg. nr': 'Fleet Number'
+        'reg': 'Fleet Number', 'registration': 'Fleet Number', 'registration nr': 'Fleet Number', 'reg nr': 'Fleet Number'
     }
-    df.columns = [str(col).strip().rstrip(':') for col in df.columns]
+    # Clean all column names first
+    df.columns = [clean_col_name(col) for col in df.columns]
+    # Then rename
     for old, new in rename_map.items():
-        df.columns = [new if old == col.lower() else col for col in df.columns]
+        df.columns = [new if old == col else col for col in df.columns]
     return df
 
 if tracking_file and allocation_file:
@@ -72,7 +78,11 @@ if tracking_file and allocation_file:
         df_track = standardize_columns(df_track)
         df_alloc = standardize_columns(df_alloc)
 
-        # Convert Date columns to date type for matching
+        # Extract Date from Start Time if Date column missing in tracking
+        if 'Date' not in df_track.columns and 'Start Time' in df_track.columns:
+            df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce').dt.date
+        
+        # Convert dates to date type for matching
         if 'Date' in df_track.columns:
             df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce').dt.date
         if 'Date' in df_alloc.columns:
@@ -97,9 +107,9 @@ if tracking_file and allocation_file:
 
         if df_merged.empty:
             st.error("No matching rows found between files.")
-            st.write("**Tracking sample:**")
+            st.write("**Tracking sample - check Fleet Number + Date format:**")
             st.dataframe(df_track[['Fleet Number', 'Date']].head())
-            st.write("**Allocation sample:**")
+            st.write("**Allocation sample - check Fleet Number + Date format:**")
             st.dataframe(df_alloc[['Fleet Number', 'Date']].head())
             st.stop()
 
