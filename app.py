@@ -74,7 +74,7 @@ def standardize_columns(df):
 
 if tracking_file and allocation_file:
     try:
-        # Read tracking file - still needs header detection
+        # Read tracking file - auto detect header
         df_track_raw = pd.read_excel(tracking_file, header=None)
         track_header = find_tracking_header(df_track_raw)
         df_track = pd.read_excel(tracking_file, header=track_header)
@@ -104,7 +104,7 @@ if tracking_file and allocation_file:
                 st.error(f"Tracking file missing both 'Date' and 'Start Time' columns. Found: {list(df_track.columns)}")
                 st.stop()
         
-        # Parse dates - simple now, no custom function needed
+        # Parse dates - handles '2026 02 21' format
         df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
         
@@ -121,14 +121,13 @@ if tracking_file and allocation_file:
         st.write(f"After cleaning - Tracking: {len(df_track)}, Allocation: {len(df_alloc)}")
 
         if df_alloc.empty:
-            st.error("Allocation data is empty after cleaning.")
+            st.error("Allocation data is empty after cleaning. Make sure FLEET column has values for worked days.")
             st.stop()
 
-        # Merge
         df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
 
         if df_merged.empty:
-            st.error("No matching rows. Check Fleet Number and Date match exactly.")
+            st.error("No matching rows.")
             with st.expander("Debug: Keys"):
                 st.write("**Tracking keys:**")
                 st.dataframe(df_track[['Fleet Number', 'Date']].drop_duplicates().head(10))
@@ -136,7 +135,6 @@ if tracking_file and allocation_file:
                 st.dataframe(df_alloc[['Fleet Number', 'Date']].drop_duplicates().head(10))
             st.stop()
 
-        # Calculate hours
         if 'Activity Description' in df_merged.columns:
             df_merged['yard_hours'] = df_merged['Activity Description'].apply(extract_yard_hours)
         else:
