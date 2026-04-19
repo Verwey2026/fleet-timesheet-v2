@@ -19,8 +19,8 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V4.2", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 4.2 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V4.3", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 4.3 - Verwey Vervoer")
 
 st.markdown("Allocates drivers to Fleet Numbers and calculates **Normal Hours, Overtime @1.5, Yard Hours**.")
 
@@ -57,7 +57,7 @@ def clean_col_name(col):
 
 def standardize_columns(df):
     rename_map = {
-        'date': 'Date', 'trip date': 'Date', 'day': 'Date', 'tripdate': 'Date',
+        'date': 'Date', 'trip date': 'Date', 'tripdate': 'Date',
         'driver': 'Employee Name', 'employee': 'Employee Name', 'employee name': 'Employee Name', 'name': 'Employee Name', 'phh': 'Employee Name',
         'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'activity description': 'Activity Description', 'unnamed 11': 'Activity Description',
         'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time', 'departure': 'Start Time', 'starttime': 'Start Time',
@@ -74,13 +74,13 @@ def standardize_columns(df):
 
 if tracking_file and allocation_file:
     try:
-        # Read tracking file
+        # Read tracking file - auto detect header
         df_track_raw = pd.read_excel(tracking_file, header=None)
         track_header = find_tracking_header(df_track_raw)
         df_track = pd.read_excel(tracking_file, header=track_header)
         df_track = standardize_columns(df_track)
 
-        # Read allocation file
+        # Read allocation file - header row 0
         xls = pd.ExcelFile(allocation_file)
         all_alloc_dfs = []
         
@@ -107,9 +107,8 @@ if tracking_file and allocation_file:
         # DEBUG: Show raw date values
         st.write("**Allocation Date sample before parsing:**", df_alloc['Date'].head(5).tolist())
         
-        # Parse dates - handle 'YYYY MM DD' format specifically
+        # Parse dates - allocation uses 'YYYY MM DD' format
         df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce', dayfirst=True)
-        # For allocation: try 'YYYY MM DD' first, then fallback
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], format='%Y %m %d', errors='coerce')
         
         st.write("**NaT count in Allocation Date after parsing:**", df_alloc['Date'].isna().sum())
@@ -131,6 +130,7 @@ if tracking_file and allocation_file:
 
         if df_alloc.empty:
             st.error("Allocation data is empty after cleaning.")
+            st.info("Make sure FLEET column has values for days the driver worked.")
             st.stop()
 
         df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
