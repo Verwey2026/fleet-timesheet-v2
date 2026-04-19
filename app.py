@@ -22,7 +22,7 @@ if not st.session_state.authenticated:
 st.set_page_config(page_title="Fleet Timesheet Processor V2.4", layout="wide")
 st.title("Fleet Timesheet Processor VERSION 2.4 - Yard Hours + Fleet Number Extraction")
 
-st.markdown("Merges on **Fleet Number + Date**. Uses sheet name for driver if Employee Name column is empty.")
+st.markdown("Merges on **Fleet Number + Date**. Extracts yard hours from Activity Description.")
 
 col1, col2 = st.columns(2)
 
@@ -32,7 +32,7 @@ with col1:
 
 with col2:
     st.subheader("2. Upload Driver Allocation")
-    allocation_file = st.file_uploader("Multi-sheet: Sheet = Driver, Uses unnamed 11 for activity", type=["xlsx", "xls"], key="allocation")
+    allocation_file = st.file_uploader("Must have: Date, Employee Name, Fleet Number, Activity Description", type=["xlsx", "xls"], key="allocation")
 
 def find_header_row(df_raw):
     for idx, row in df_raw.iterrows():
@@ -55,7 +55,7 @@ def standardize_columns(df):
     rename_map = {
         'date': 'Date', 'trip date': 'Date', 'day': 'Date',
         'driver': 'Employee Name', 'employee': 'Employee Name', 'employee name': 'Employee Name', 'name': 'Employee Name', 'phh': 'Employee Name',
-        'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'activity description': 'Activity Description', 'unnamed 11': 'Activity Description',
+        'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'activity description': 'Activity Description',
         'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time',
         'end': 'End Time', 'end time': 'End Time', 'arrival time': 'End Time', 'last movement': 'End Time',
         'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number', 
@@ -75,7 +75,7 @@ if tracking_file and allocation_file:
         df_track = pd.read_excel(tracking_file, header=find_header_row(pd.read_excel(tracking_file, header=None)))
         df_track = standardize_columns(df_track)
 
-        # Read ALL sheets from allocation file and combine them
+        # Read allocation file - handle multi-sheet
         xls = pd.ExcelFile(allocation_file)
         all_alloc_dfs = []
         
@@ -93,15 +93,11 @@ if tracking_file and allocation_file:
         
         df_alloc = pd.concat(all_alloc_dfs, ignore_index=True)
 
-        # Extract Date from Start Time if Date column missing in tracking
-        if 'Date' not in df_track.columns and 'Start Time' in df_track.columns:
-            df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce').dt.date
-        
-        # Convert dates to date type for matching
-        if 'Date' in df_track.columns:
-            df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce').dt.date
-        if 'Date' in df_alloc.columns:
-            df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce').dt.date
+        # CRITICAL FIX: Force both Date and Fleet Number to same type before merge
+        df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce').dt.date
+        df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce').dt.date
+        df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip()
+        df_alloc['Fleet Number'] = df_alloc['Fleet Number'].astype(str).str.strip()
 
         # Check required columns
         required_track = ['Fleet Number', 'Date', 'Start Time', 'End Time']
@@ -121,7 +117,7 @@ if tracking_file and allocation_file:
         df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
 
         if df_merged.empty:
-            st.error("No matching rows found between files.")
+            st.error("No matching rows found between files. Check that Fleet Number and Date values match exactly.")
             st.write("**Tracking sample:**")
             st.dataframe(df_track[['Fleet Number', 'Date']].head())
             st.write("**Allocation sample:**")
