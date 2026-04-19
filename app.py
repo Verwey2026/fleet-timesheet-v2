@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import io
 from datetime import time
+from urllib.parse import unquote
 
 # ===== PASSWORD GATE =====
 if "authenticated" not in st.session_state:
@@ -20,25 +21,25 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V4.12", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 4.12 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V4.14", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 4.14 - Verwey Vervoer")
 
-st.markdown("**Rules:** 1h unpaid lunch. First 195.03h = Normal. Sat @1.5, Sun @2.0. Counts Local/Xborder sleep outs + Abnormal truck days.")
+st.markdown("**Rules:** 195.03 fills Mon-Fri first, then Sat@1.5, then Sun@2.0. Geo fence = Middelburg only.")
 
 NORMAL_HOURS_THRESHOLD = 195.03
-GEO_FENCE_TOWNS = ['STEVE TSHWETE', 'MIDDELBURG', 'WITBANK', 'EMALAHLENI'] # TODO: Update your geo fence
-CROSSBORDER_COUNTRIES = ['ZIMBABWE', 'BOTSWANA', 'NAMIBIA', 'MOZAMBIQUE', 'ZAMBIA', 'DRC', 'LESOTHO', 'ESWATINI', 'MALAWI', 'TANZANIA']
-ABNORMAL_FLEETS = ['FL221', 'FL222', 'FL223', 'FL225', 'FL229', 'FL230', 'FL238'] # TODO: Add full list
+GEO_FENCE_KEYWORDS = ['MIDDELBURG', 'STEVE TSHWETE'] # Middelburg region only = 0 sleep out
+CROSSBORDER_COUNTRIES = ['ZIMBABWE', 'BOTSWANA', 'NAMIBIA', 'MOZAMBIQUE', 'ZAMBIA', 'DRC', 'LESOTHO', 'ESWATINI', 'MALAWI', 'TANZANIA', 'ANGOLA']
+ABNORMAL_FLEETS = ['FL221', 'FL222', 'FL223', 'FL225', 'FL229', 'FL230', 'FL238'] # Add full list when ready
 
 st.sidebar.subheader("NBCRFLI Settings")
 NORMAL_HOURS_THRESHOLD = st.sidebar.number_input("Normal Hours Threshold", value=195.03, step=0.01)
-st.sidebar.markdown("**Abnormal Fleets:** " + ", ".join(ABNORMAL_FLEETS))
+st.sidebar.markdown(f"**Abnormal Fleets:** {', '.join(ABNORMAL_FLEETS)}")
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("1. Upload Tracking Report")
-    tracking_file = st.file_uploader("Must have DEPARTURE + ARRIVAL columns", type=["xlsx", "xls", "csv"], key="tracking")
+    tracking_file = st.file_uploader("Must have ARRIVAL column with location/link", type=["xlsx", "xls", "csv"], key="tracking")
 
 with col2:
     st.subheader("2. Upload Driver Allocation")
@@ -50,6 +51,20 @@ def find_tracking_header(df_raw):
         if 'REGISTRATION' in row_str and 'DEPARTURE' in row_str and 'ARRIVAL' in row_str:
             return idx
     return 0
+
+def extract_location_from_link(text):
+    """Extract town/country from Google Maps link or plain text"""
+    if pd.isna(text): return ''
+    text = str(text).upper()
+    if 'HTTP' in text or 'GOOGLE.COM/MAPS' in text:
+        match = re.search(r'/PLACE/([^/@]+)', text)
+        if match:
+            return unquote(match.group(1).replace('+', ' '))
+        match = re.search(r'[?&]Q=([^&]+)', text)
+        if match:
+            return unquote(match.group(1).replace('+', ' '))
+        return text
+    return text
 
 def extract_yard_hours_from_text(text):
     if pd.isna(text): return 0.0
@@ -96,15 +111,21 @@ def auto_lunch_deduction(row):
 def classify_sleep_out(row):
     nights = pd.to_numeric(row.get('Sleep Out', 0), errors='coerce')
     if pd.isna(nights) or nights == 0:
-        return 'none', 0
+        return 0, 0
 
-    arrival = str(row.get('Arrival', '')).upper().strip()
+    arrival_raw = row.get('Arrival', '')
+    arrival = extract_location_from_link(arrival_raw)
 
+    # Crossborder check
     if any(country in arrival for country in CROSSBORDER_COUNTRIES):
-        return 'crossborder', nights
-    if any(town in arrival for town in GEO_FENCE_TOWNS):
-        return 'geofence', 0
-    return 'local', nights
+        return 0, nights # local=0, xborder=nights
+
+    # Geo fence = Middelburg only
+    if any(town in arrival for town in GEO_FENCE_KEYWORDS):
+        return 0, 0 # In geo fence = no allowance
+
+    # Otherwise assume SA local
+    return nights, 0 # local=nights, xborder=0
 
 def is_abnormal(fleet_no):
     return any(fleet_no.startswith(prefix) for prefix in ABNORMAL_FLEETS)
@@ -174,10 +195,8 @@ if tracking_file and allocation_file:
 
         # Sleep out classification
         sleep_data = df_merged.apply(classify_sleep_out, axis=1, result_type='expand')
-        df_merged['sleep_out_type'] = sleep_data[0]
-        df_merged['sleep_out_nights'] = sleep_data[1]
-        df_merged['sleep_out_local'] = df_merged.apply(lambda x: x['sleep_out_nights'] if x['sleep_out_type'] == 'local' else 0, axis=1)
-        df_merged['sleep_out_crossborder'] = df_merged.apply(lambda x: x['sleep_out_nights'] if x['sleep_out_type'] == 'crossborder' else 0, axis=1)
+        df_merged['sleep_out_local'] = sleep_data[0]
+        df_merged['sleep_out_crossborder'] = sleep_data[1]
 
         # Yard hours from text only
         if 'Activity Description' in df_merged.columns:
@@ -188,12 +207,12 @@ if tracking_file and allocation_file:
         df_merged['total_hours'] = (df_merged['gross_hours'] - df_merged['meal_hour']).clip(lower=0)
         df_merged['driving_hours'] = (df_merged['total_hours'] - df_merged['yard_hours']).clip(lower=0)
 
-        df_merged['weekday'] = pd.to_datetime(df_merged['Date']).dt.dayofweek
+        df_merged['weekday'] = pd.to_datetime(df_merged['Date']).dt.dayofweek # 0=Mon, 5=Sat, 6=Sun
         df_merged['is_abnormal'] = df_merged['Fleet Number'].apply(is_abnormal)
 
         df_merged = df_merged.sort_values(['Employee Name', 'Date', 'Start Time'])
 
-        # ===== RUNNING 195.03 SPLIT WITH DAY RATES =====
+        # ===== NEW FILL LOGIC: M-F → SAT → SUN =====
         df_merged['normal_weekday'] = 0.0
         df_merged['normal_sat'] = 0.0
         df_merged['normal_sun'] = 0.0
@@ -202,29 +221,39 @@ if tracking_file and allocation_file:
         df_merged['ot_sun'] = 0.0
 
         for driver in df_merged['Employee Name'].unique():
-            mask = df_merged['Employee Name'] == driver
-            driver_idx = df_merged.loc[mask].index
-            cumulative_normal = 0.0
+            driver_rows = df_merged[df_merged['Employee Name'] == driver].copy()
 
-            for idx in driver_idx:
-                hours_today = df_merged.at[idx, 'total_hours']
-                weekday = df_merged.at[idx, 'weekday']
+            # Step 1: Sum all Mon-Fri hours
+            mon_fri_hours = driver_rows.loc[driver_rows['weekday'] < 5, 'total_hours'].sum()
 
-                remaining_normal = max(0, NORMAL_HOURS_THRESHOLD - cumulative_normal)
-                normal_today = min(hours_today, remaining_normal)
-                ot_today = hours_today - normal_today
+            # Step 2: Determine how much normal is left after M-F
+            normal_remaining = max(0, NORMAL_HOURS_THRESHOLD - mon_fri_hours)
 
-                if weekday == 6: # Sunday
-                    df_merged.at[idx, 'normal_sun'] = normal_today
-                    df_merged.at[idx, 'ot_sun'] = ot_today
-                elif weekday == 5: # Saturday
-                    df_merged.at[idx, 'normal_sat'] = normal_today
-                    df_merged.at[idx, 'ot_sat'] = ot_today
-                else: # Weekday
+            # Step 3: Process in order: M-F, Sat, Sun
+            for idx in driver_rows.index:
+                hours_today = driver_rows.at[idx, 'total_hours']
+                weekday = driver_rows.at[idx, 'weekday']
+
+                if weekday < 5: # Mon-Fri
+                    normal_today = min(hours_today, NORMAL_HOURS_THRESHOLD - (NORMAL_HOURS_THRESHOLD - normal_remaining - df_merged.loc[driver_rows.index[0]:idx-1, 'normal_weekday'].sum() if idx > driver_rows.index[0] else 0))
+                    # Simpler: just allocate all M-F to normal until 195.03, then OT
+                    filled_so_far = driver_rows.loc[(driver_rows.index < idx) & (driver_rows['weekday'] < 5), 'normal_weekday'].sum()
+                    normal_today = min(hours_today, max(0, NORMAL_HOURS_THRESHOLD - filled_so_far))
+                    ot_today = hours_today - normal_today
                     df_merged.at[idx, 'normal_weekday'] = normal_today
                     df_merged.at[idx, 'ot_weekday'] = ot_today
-
-                cumulative_normal += normal_today
+                elif weekday == 5: # Saturday
+                    normal_today = min(hours_today, normal_remaining)
+                    ot_today = hours_today - normal_today
+                    df_merged.at[idx, 'normal_sat'] = normal_today
+                    df_merged.at[idx, 'ot_sat'] = ot_today
+                    normal_remaining -= normal_today
+                else: # Sunday
+                    normal_today = min(hours_today, normal_remaining)
+                    ot_today = hours_today - normal_today
+                    df_merged.at[idx, 'normal_sun'] = normal_today
+                    df_merged.at[idx, 'ot_sun'] = ot_today
+                    normal_remaining -= normal_today
 
         # ===== ABNORMAL TRUCK DAY COUNT =====
         abnormal_days = df_merged[df_merged['is_abnormal'] == True].groupby('Employee Name')['Date'].nunique().reset_index()
@@ -251,10 +280,10 @@ if tracking_file and allocation_file:
 
         driver_totals = driver_totals.rename(columns={
             'total_hours': 'PAID HOURS',
-            'normal_weekday': 'NORMAL WD',
+            'normal_weekday': 'NORMAL M-F',
             'normal_sat': 'NORMAL SAT@1.5',
             'normal_sun': 'NORMAL SUN@2.0',
-            'ot_weekday': 'OT WD@1.5',
+            'ot_weekday': 'OT M-F@1.5',
             'ot_sat': 'OT SAT@1.5',
             'ot_sun': 'OT SUN@2.0',
             'yard_hours': 'YARD',
@@ -266,10 +295,10 @@ if tracking_file and allocation_file:
 
         st.success(f"Allocated {len(df_merged)} trips to {df_merged['Employee Name'].nunique()} drivers!")
 
-        st.subheader(f"Summary - Includes Abnormal Days + Sleep Out Counts")
+        st.subheader(f"Summary - 195.03 fills M-F → Sat → Sun")
         st.dataframe(driver_totals.round(2))
 
-        st.subheader("All Trips with Abnormal Flag")
+        st.subheader("All Trips")
         display_cols = ['Date', 'Employee Name', 'Fleet Number', 'is_abnormal', 'Arrival', 'weekday', 'Start Time', 'End Time',
                        'total_hours', 'normal_weekday', 'normal_sat', 'normal_sun',
                        'ot_weekday', 'ot_sat', 'ot_sun', 'yard_hours', 'meal_hour',
@@ -303,7 +332,7 @@ if tracking_file and allocation_file:
         output.seek(0)
 
         st.download_button(
-            "📥 Download Excel - With Abnormal Days",
+            "📥 Download Excel - M-F→Sat→Sun Fill Order",
             output,
             "fleet_timesheet_processed.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
