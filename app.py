@@ -19,8 +19,8 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V2.10", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 2.10 - Debug Mode")
+st.set_page_config(page_title="Fleet Timesheet Processor V3.0", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 3.0 - Verwey Vervoer")
 
 st.markdown("Allocates drivers to Fleet Numbers and calculates **Normal Hours, Overtime @1.5, Yard Hours**.")
 
@@ -36,14 +36,12 @@ with col1:
 
 with col2:
     st.subheader("2. Upload Driver Allocation")
-    allocation_file = st.file_uploader("Verwey format: Sheet = Driver", type=["xlsx", "xls"], key="allocation")
+    allocation_file = st.file_uploader("Verwey format: Header on row 12", type=["xlsx", "xls"], key="allocation")
 
 def find_header_row(df_raw):
     for idx, row in df_raw.iterrows():
         row_str = ' '.join([str(x).upper() for x in row.values])
         if 'REGISTRATION' in row_str and 'DEPARTURE' in row_str and 'ARRIVAL' in row_str:
-            return idx
-        if 'DAY' in row_str and 'DATE' in row_str and 'FLEET' in row_str:
             return idx
     return 0
 
@@ -75,50 +73,39 @@ def standardize_columns(df):
     return df
 
 def parse_date_flexible(date_val):
+    """Handles '2026-02-21 0', '21 02 2026', Excel serials, etc"""
     if pd.isna(date_val):
         return pd.NaT
+    
+    date_str = str(date_val).strip()
+    
+    # Strip trailing time like ' 0' or ' 00:00:00'
+    if ' ' in date_str:
+        date_str = date_str.split(' ')[0]
+    
     try:
-        if isinstance(date_val, str) and len(date_val.split()) == 3:
-            return pd.to_datetime(date_val, format='%d %m %Y', errors='coerce')
-        return pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+        if '-' in date_str and len(date_str.split('-')[0]) == 4:
+            return pd.to_datetime(date_str, format='%Y-%m-%d', errors='coerce')
+        if len(date_str.split()) == 3:
+            return pd.to_datetime(date_str, format='%d %m %Y', errors='coerce')
+        return pd.to_datetime(date_str, errors='coerce', dayfirst=True)
     except:
         return pd.NaT
 
 if tracking_file and allocation_file:
     try:
-        # Read tracking file
+        # Read tracking file - auto detect header
         df_track_raw = pd.read_excel(tracking_file, header=None)
         track_header = find_header_row(df_track_raw)
         df_track = pd.read_excel(tracking_file, header=track_header)
         df_track = standardize_columns(df_track)
 
-        # Read allocation file - each sheet = one driver
+        # Read allocation file - HARDCODE header to row 12 (index 11)
         xls = pd.ExcelFile(allocation_file)
         all_alloc_dfs = []
         
         for sheet_name in xls.sheet_names:
-            df_sheet_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-            
-            # DIAGNOSTIC: Show raw sheet structure
-            st.write(f"**Sheet '{sheet_name}' - First 15 raw rows:**")
-            st.dataframe(df_sheet_raw.head(15))
-            
-            header_row = find_header_row(df_sheet_raw)
-            st.write(f"Detected header row: {header_row}")
-            
-            df_sheet = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
-            
-            st.write(f"**After header={header_row}, first 5 rows:**")
-            st.dataframe(df_sheet.head())
-            st.write(f"Column names: {list(df_sheet.columns)}")
-            
-            # Force Column B to be Date BEFORE standardizing
-            if len(df_sheet.columns) > 1:
-                st.write(f"Column B values before forcing: {df_sheet.iloc[:5, 1].tolist()}")
-                cols = list(df_sheet.columns)
-                cols[1] = 'Date'
-                df_sheet.columns = cols
-            
+            df_sheet = pd.read_excel(xls, sheet_name=sheet_name, header=11) # Row 12 = index 11
             df_sheet = standardize_columns(df_sheet)
             df_sheet['Employee Name'] = sheet_name
             all_alloc_dfs.append(df_sheet)
@@ -141,9 +128,6 @@ if tracking_file and allocation_file:
         df_track['Date'] = df_track['Date'].apply(parse_date_flexible).dt.strftime('%Y-%m-%d')
         df_alloc['Date'] = df_alloc['Date'].apply(parse_date_flexible).dt.strftime('%Y-%m-%d')
         
-        st.write("**Allocation Date column after parsing:**")
-        st.dataframe(df_alloc[['Fleet Number', 'Date', 'Employee Name']].head(10))
-        
         # Standardize Fleet Number
         df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip().str.upper()
         df_alloc['Fleet Number'] = df_alloc['Fleet Number'].astype(str).str.strip().str.upper()
@@ -158,7 +142,7 @@ if tracking_file and allocation_file:
         st.write(f"Allocation rows AFTER dropna: {len(df_alloc)}")
 
         if df_alloc.empty:
-            st.error("Allocation data is empty after cleaning. Check the 'Allocation Date column after parsing' table above.")
+            st.error("Allocation data is empty after cleaning.")
             st.stop()
 
         # Merge
@@ -166,6 +150,10 @@ if tracking_file and allocation_file:
 
         if df_merged.empty:
             st.error("No matching rows. Check Fleet Number and Date match exactly.")
+            st.write("**Tracking unique keys:**")
+            st.dataframe(df_track[['Fleet Number', 'Date']].drop_duplicates().head(10))
+            st.write("**Allocation unique keys:**")
+            st.dataframe(df_alloc[['Fleet Number', 'Date']].drop_duplicates().head(10))
             st.stop()
 
         # Calculate hours
