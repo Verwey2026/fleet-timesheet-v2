@@ -22,7 +22,7 @@ if not st.session_state.authenticated:
 st.set_page_config(page_title="Fleet Timesheet Processor V2.4", layout="wide")
 st.title("Fleet Timesheet Processor VERSION 2.4 - Yard Hours + Fleet Number Extraction")
 
-st.markdown("Merges on **Fleet Number + Date**. Reads driver name from sheet name. Extracts yard hours from Column K.")
+st.markdown("Merges on **Fleet Number + Date**. Uses sheet name for driver if Employee Name column is empty.")
 
 col1, col2 = st.columns(2)
 
@@ -32,7 +32,7 @@ with col1:
 
 with col2:
     st.subheader("2. Upload Driver Allocation")
-    allocation_file = st.file_uploader("Sheet name = Driver. Column K = Activity", type=["xlsx", "xls"], key="allocation")
+    allocation_file = st.file_uploader("Multi-sheet: Sheet = Driver, Uses Activity Description col", type=["xlsx", "xls"], key="allocation")
 
 def find_header_row(df_raw):
     for idx, row in df_raw.iterrows():
@@ -54,6 +54,8 @@ def clean_col_name(col):
 def standardize_columns(df):
     rename_map = {
         'date': 'Date', 'trip date': 'Date', 'day': 'Date',
+        'driver': 'Employee Name', 'employee': 'Employee Name', 'employee name': 'Employee Name', 'name': 'Employee Name',
+        'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'activity description': 'Activity Description',
         'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time',
         'end': 'End Time', 'end time': 'End Time', 'arrival time': 'End Time', 'last movement': 'End Time',
         'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number', 
@@ -62,6 +64,9 @@ def standardize_columns(df):
     df.columns = [clean_col_name(col) for col in df.columns]
     for old, new in rename_map.items():
         df.columns = [new if old == col else col for col in df.columns]
+    
+    # Drop duplicate columns - keeps first occurrence
+    df = df.loc[:, ~df.columns.duplicated()]
     return df
 
 if tracking_file and allocation_file:
@@ -80,12 +85,9 @@ if tracking_file and allocation_file:
             df_sheet = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
             df_sheet = standardize_columns(df_sheet)
             
-            # Sheet name = Employee Name
-            df_sheet['Employee Name'] = sheet_name
-            
-            # Column K is index 10 - rename it to Activity Description
-            if len(df_sheet.columns) > 10:
-                df_sheet = df_sheet.rename(columns={df_sheet.columns[10]: 'Activity Description'})
+            # Use sheet name as Employee Name if column is missing or empty
+            if 'Employee Name' not in df_sheet.columns or df_sheet['Employee Name'].isna().all():
+                df_sheet['Employee Name'] = sheet_name
             
             all_alloc_dfs.append(df_sheet)
         
@@ -126,7 +128,7 @@ if tracking_file and allocation_file:
             st.dataframe(df_alloc[['Fleet Number', 'Date', 'Employee Name']].head())
             st.stop()
 
-        # Extract yard hours from Column K
+        # Extract yard hours from Activity Description
         df_merged['yard_hours'] = df_merged['Activity Description'].apply(extract_yard_hours)
         
         # Calculate hours
