@@ -52,9 +52,6 @@ def clean_col_name(col):
     return str(col).strip().lower().replace(':', '').replace('.', '').strip()
 
 def standardize_columns(df):
-    # Show original columns for debugging
-    original_cols = list(df.columns)
-    
     rename_map = {
         'date': 'Date', 'trip date': 'Date', 'day': 'Date',
         'driver': 'Employee Name', 'employee': 'Employee Name', 'employee name': 'Employee Name', 'name': 'Employee Name', 'phh': 'Employee Name',
@@ -99,15 +96,17 @@ if tracking_file and allocation_file:
         # Create Date from Start Time if tracking file has no Date column
         if 'Date' not in df_track.columns:
             if 'Start Time' in df_track.columns:
-                df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce').dt.date
+                df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce')
             else:
                 st.error("Tracking file missing both 'Date' and 'Start Time' columns")
                 st.write("Tracking columns:", list(df_track.columns))
                 st.stop()
         
-        # Force both Date and Fleet Number to same type for merge
-        df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce').dt.date
-        df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce').dt.date
+        # CRITICAL FIX: Convert BOTH Date columns to string YYYY-MM-DD for merge
+        df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        
+        # Force Fleet Number to string and strip whitespace
         df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip()
         df_alloc['Fleet Number'] = df_alloc['Fleet Number'].astype(str).str.strip()
 
@@ -125,7 +124,7 @@ if tracking_file and allocation_file:
             st.error(f"Allocation file missing: {missing_alloc}. Found: {list(df_alloc.columns)}")
             st.stop()
 
-        # Merge on Fleet Number + Date
+        # Merge on Fleet Number + Date - now both are strings
         df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
 
         if df_merged.empty:
