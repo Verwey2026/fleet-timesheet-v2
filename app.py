@@ -1,140 +1,169 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO
-from datetime import datetime, timedelta
+import re
+import io
 
-st.set_page_config(page_title="Fleet Timesheet Processor V2.4", layout="wide")
+# ===== PASSWORD GATE =====
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
 
-# --- PASSWORD GATE ---
-def check_password():
-    """Returns True if user entered correct password."""
-    
-    def password_entered():
-        if st.session_state["password"] == st.secrets["app_password"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # don't store password
+if not st.session_state.authenticated:
+    st.title("Fleet Timesheet Processor")
+    password = st.text_input("Enter password", type="password")
+    if password:
+        if password == st.secrets["app_password"]:
+            st.session_state.authenticated = True
+            st.rerun()
         else:
-            st.session_state["password_correct"] = False
+            st.error("Incorrect password")
+    st.stop()
 
-    if "password_correct" not in st.session_state:
-        # First run, show input for password.
-        st.text_input("Password", type="password", on_change=password_entered, key="password")
-        st.caption("This app is private.")
-        return False
-    elif not st.session_state["password_correct"]:
-        # Password not correct, show input + error.
-        st.text_input("Password", type="password", on_change=password_entered, key="password")
-        st.error("😕 Password incorrect")
-        return False
-    else:
-        # Password correct.
-        return True
+# ===== MAIN APP =====
+st.set_page_config(page_title="Fleet Timesheet Processor V2.4", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 2.4 - Yard Hours + Fleet Number Extraction")
 
-if not check_password():
-    st.stop()  # Don't run rest of app unless password correct
+st.markdown("Upload your **Tracking Report** and **Driver Allocation** files. The app will merge them, extract yard hours, and pull fleet numbers.")
 
-# --- MAIN APP STARTS HERE ---
-st.title("Fleet Timesheet Processor")
-st.caption("**VERSION 2.4 - Yard Hours + Fleet Number Extraction**")
+col1, col2 = st.columns(2)
 
-uploaded_file = st.file_uploader("Upload Timesheet Excel File", type=["xlsx", "xls"])
+with col1:
+    st.subheader("1. Upload Tracking Report")
+    tracking_file = st.file_uploader(
+        "Tracking file with Start/End times", 
+        type=["xlsx", "xls", "csv"], 
+        key="tracking"
+    )
+
+with col2:
+    st.subheader("2. Upload Driver Allocation")
+    allocation_file = st.file_uploader(
+        "Allocation file with Employee Names + Descriptions", 
+        type=["xlsx", "xls", "csv"], 
+        key="allocation"
+    )
+
+def extract_yard_hours(text):
+    if pd.isna(text):
+        return 0.0
+    text = str(text).lower()
+    # Matches: "2h yard", "yard: 1.5", "1.5hr yard", "yard work 2"
+    match = re.search(r'(\d+\.?\d*)\s*h(?:our)?s?\s*yard|yard[:\s]*(\d+\.?\d*)', text)
+    if match:
+        return float(match.group(1) or match.group(2))
+    return 0.0
 
 def extract_fleet_number(text):
-    """Extract fleet number like 31343, 31478 from text like '3.1 Vehicle Travel 31343 to...'"""
     if pd.isna(text):
         return ""
-    text = str(text)
-    import re
-    match = re.search(r'\b(\d{5})\b', text)
-    if match:
-        return match.group(1)
-    match = re.search(r'\b(\d{4,6})\b', text)
+    text = str(text).upper()
+    # Matches: TDH123, Fleet #456, FLEET: ABC789
+    match = re.search(r'(?:FLEET|TDH|ABC|TRUCK)[\s#:]*([A-Z0-9]+)', text)
     if match:
         return match.group(1)
     return ""
 
-def process_timesheet(df):
-    df = df.copy()
-    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-    
+def standardize_columns(df):
+    # Map common column variations to standard names
     rename_map = {
-        'date': 'date', 'employee': 'employee_name', 'employee_name': 'employee_name', 
-        'name': 'employee_name', 'activity': 'activity_description', 'description': 'activity_description',
-        'activity_description': 'activity_description', 'start': 'start_time', 'start_time': 'start_time',
-        'end': 'end_time', 'end_time': 'end_time'
+        'date': 'Date', 'trip date': 'Date',
+        'driver': 'Employee Name', 'employee': 'Employee Name', 'employee name': 'Employee Name', 'name': 'Employee Name',
+        'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'comments': 'Activity Description',
+        'start': 'Start Time', 'start time': 'Start Time', 'clock in': 'Start Time', 'time start': 'Start Time',
+        'end': 'End Time', 'end time': 'End Time', 'clock out': 'End Time', 'time end': 'End Time',
+        'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number'
     }
-    
-    for old, new in rename_map.items():
-        if old in df.columns:
-            df = df.rename(columns={old: new})
-    
-    required_cols = ['date', 'employee_name', 'activity_description', 'start_time', 'end_time']
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        st.error(f"Missing required columns: {missing}. Found columns: {list(df.columns)}")
-        st.stop()
-    
-    df['start_time'] = pd.to_datetime(df['start_time'], errors='coerce').dt.time
-    df['end_time'] = pd.to_datetime(df['end_time'], errors='coerce').dt.time
-    df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
-    df = df.dropna(subset=['start_time', 'end_time', 'date'])
-    
-    def calc_hours(row):
-        start_dt = datetime.combine(datetime.today(), row['start_time'])
-        end_dt = datetime.combine(datetime.today(), row['end_time'])
-        if end_dt < start_dt:
-            end_dt += timedelta(days=1)
-        delta = end_dt - start_dt
-        return round(delta.total_seconds() / 3600, 2)
-    
-    df['hours'] = df.apply(calc_hours, axis=1)
-    df['fleet_number'] = df['activity_description'].apply(extract_fleet_number)
-    
-    yard_keywords = ['yard', 'workshop', 'depot', 'base']
-    df['is_yard'] = df['activity_description'].str.lower().str.contains('|'.join(yard_keywords), na=False)
-    df['yard_hours'] = df.apply(lambda r: r['hours'] if r['is_yard'] else 0, axis=1)
-    df['field_hours'] = df.apply(lambda r: 0 if r['is_yard'] else r['hours'], axis=1)
-    
+    df.columns = [col.strip() for col in df.columns]
+    df = df.rename(columns={k.title(): v for k, v in rename_map.items() if k.title() in df.columns})
+    df = df.rename(columns={k.lower(): v for k, v in rename_map.items() if k.lower() in df.columns})
+    df = df.rename(columns={k.upper(): v for k, v in rename_map.items() if k.upper() in df.columns})
     return df
 
-def to_excel(df):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Processed')
-    output.seek(0)
-    return output
-
-if uploaded_file:
+if tracking_file and allocation_file:
     try:
-        df_raw = pd.read_excel(uploaded_file)
-        st.subheader("Raw Data Preview")
-        st.dataframe(df_raw.head(10))
+        # Read files
+        if tracking_file.name.endswith('.csv'):
+            df_track = pd.read_csv(tracking_file)
+        else:
+            df_track = pd.read_excel(tracking_file)
+            
+        if allocation_file.name.endswith('.csv'):
+            df_alloc = pd.read_csv(allocation_file)
+        else:
+            df_alloc = pd.read_excel(allocation_file)
+
+        # Standardize column names
+        df_track = standardize_columns(df_track)
+        df_alloc = standardize_columns(df_alloc)
+
+        # Check required columns
+        required_track = ['Date', 'Employee Name', 'Start Time', 'End Time']
+        required_alloc = ['Date', 'Employee Name', 'Activity Description']
         
-        df_processed = process_timesheet(df_raw)
+        missing_track = [col for col in required_track if col not in df_track.columns]
+        missing_alloc = [col for col in required_alloc if col not in df_alloc.columns]
         
-        st.subheader("Processed Data Preview")
-        st.dataframe(df_processed.head(20))
+        if missing_track:
+            st.error(f"Tracking file missing columns: {missing_track}. Found: {list(df_track.columns)}")
+            st.stop()
+        if missing_alloc:
+            st.error(f"Allocation file missing columns: {missing_alloc}. Found: {list(df_alloc.columns)}")
+            st.stop()
+
+        # Merge on Date + Employee Name
+        df_merged = pd.merge(
+            df_track, 
+            df_alloc, 
+            on=['Date', 'Employee Name'], 
+            how='inner',
+            suffixes=('_track', '_alloc')
+        )
+
+        if df_merged.empty:
+            st.error("No matching rows found between files. Check that Date and Employee Name match exactly in both files.")
+            st.stop()
+
+        # Extract yard hours and fleet numbers from Activity Description
+        df_merged['yard_hours'] = df_merged['Activity Description'].apply(extract_yard_hours)
+        df_merged['fleet_number_extracted'] = df_merged['Activity Description'].apply(extract_fleet_number)
         
-        summary = df_processed.groupby('employee_name').agg(
-            total_hours=('hours', 'sum'),
-            yard_hours=('yard_hours', 'sum'),
-            field_hours=('field_hours', 'sum'),
-            days_worked=('date', 'nunique')
-        ).reset_index()
+        # Use fleet number from tracking if available, else use extracted
+        if 'Fleet Number' in df_merged.columns:
+            df_merged['fleet_number'] = df_merged['Fleet Number'].fillna(df_merged['fleet_number_extracted'])
+        else:
+            df_merged['fleet_number'] = df_merged['fleet_number_extracted']
+
+        # Calculate total hours
+        df_merged['Start Time'] = pd.to_datetime(df_merged['Start Time'], errors='coerce')
+        df_merged['End Time'] = pd.to_datetime(df_merged['End Time'], errors='coerce')
+        df_merged['total_hours'] = (df_merged['End Time'] - df_merged['Start Time']).dt.total_seconds() / 3600
+        df_merged['driving_hours'] = df_merged['total_hours'] - df_merged['yard_hours']
+
+        # Clean up columns for display
+        display_cols = ['Date', 'Employee Name', 'fleet_number', 'Start Time', 'End Time', 
+                       'total_hours', 'yard_hours', 'driving_hours', 'Activity Description']
+        display_cols = [col for col in display_cols if col in df_merged.columns]
         
-        st.subheader("Summary by Employee")
-        st.dataframe(summary)
+        st.success(f"Merged {len(df_merged)} rows successfully!")
+        st.dataframe(df_merged[display_cols])
+
+        # Download button
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_merged[display_cols].to_excel(writer, index=False, sheet_name='Processed')
+        output.seek(0)
         
-        excel_data = to_excel(df_processed)
         st.download_button(
             label="📥 Download Processed Excel",
-            data=excel_data,
-            file_name=f"processed_timesheet_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            data=output,
+            file_name="fleet_timesheet_processed.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        
+
     except Exception as e:
-        st.error(f"Error processing file: {e}")
-        st.exception(e)
+        st.error(f"Error processing files: {str(e)}")
+        st.write("**Debug info:**")
+        if 'df_track' in locals(): st.write("Tracking columns:", list(df_track.columns))
+        if 'df_alloc' in locals(): st.write("Allocation columns:", list(df_alloc.columns))
+
 else:
-    st.info("Upload an Excel timesheet to start. Required columns: Date, Employee Name, Activity Description, Start Time, End Time")
+    st.info("👆 Upload both files to start processing")
