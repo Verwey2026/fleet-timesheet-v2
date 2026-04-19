@@ -20,20 +20,25 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V4.8", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 4.8 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V4.12", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 4.12 - Verwey Vervoer")
 
-st.markdown("**Rules:** 07:00-17:00 shift. 1h unpaid lunch auto-deducted if worked through midday. Overtime @1.5 after 195.03 paid hours.")
+st.markdown("**Rules:** 1h unpaid lunch. First 195.03h = Normal. Sat @1.5, Sun @2.0. Counts Local/Xborder sleep outs + Abnormal truck days.")
 
 NORMAL_HOURS_THRESHOLD = 195.03
+GEO_FENCE_TOWNS = ['STEVE TSHWETE', 'MIDDELBURG', 'WITBANK', 'EMALAHLENI'] # TODO: Update your geo fence
+CROSSBORDER_COUNTRIES = ['ZIMBABWE', 'BOTSWANA', 'NAMIBIA', 'MOZAMBIQUE', 'ZAMBIA', 'DRC', 'LESOTHO', 'ESWATINI', 'MALAWI', 'TANZANIA']
+ABNORMAL_FLEETS = ['FL221', 'FL222', 'FL223', 'FL225', 'FL229', 'FL230', 'FL238'] # TODO: Add full list
+
 st.sidebar.subheader("NBCRFLI Settings")
 NORMAL_HOURS_THRESHOLD = st.sidebar.number_input("Normal Hours Threshold", value=195.03, step=0.01)
+st.sidebar.markdown("**Abnormal Fleets:** " + ", ".join(ABNORMAL_FLEETS))
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("1. Upload Tracking Report")
-    tracking_file = st.file_uploader("First and Last Movement report", type=["xlsx", "xls", "csv"], key="tracking")
+    tracking_file = st.file_uploader("Must have DEPARTURE + ARRIVAL columns", type=["xlsx", "xls", "csv"], key="tracking")
 
 with col2:
     st.subheader("2. Upload Driver Allocation")
@@ -66,7 +71,9 @@ def standardize_columns(df):
         'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number',
         'reg': 'Fleet Number', 'registration': 'Fleet Number', 'registration nr': 'Fleet Number', 'reg nr': 'Fleet Number', 'fleet number': 'Fleet Number', 'reg no': 'Fleet Number',
         'meal hour': 'Meal Hour', 'meal': 'Meal Hour', 'meal hours': 'Meal Hour',
-        'sleep out': 'Sleep Out', 'sleep': 'Sleep Out', 'sleepout': 'Sleep Out'
+        'sleep out': 'Sleep Out', 'sleep': 'Sleep Out', 'sleepout': 'Sleep Out',
+        'arrival location': 'Arrival', 'arrival town': 'Arrival', 'destination': 'Arrival',
+        'departure location': 'Departure', 'departure town': 'Departure', 'origin': 'Departure'
     }
     df.columns = [clean_col_name(col) for col in df.columns]
     for old, new in rename_map.items():
@@ -76,19 +83,31 @@ def standardize_columns(df):
     return df
 
 def auto_lunch_deduction(row):
-    """If Meal Hour blank/0, deduct 1h if trip covers 12:00-13:00 and >5h total"""
     meal = pd.to_numeric(row.get('Meal Hour', 0), errors='coerce')
     if pd.notna(meal) and meal > 0:
         return meal
-
     start = row['Start Time']
     end = row['End Time']
     gross = (end - start).total_seconds() / 3600
-
-    # If trip >5h and spans midday 12:00-13:00, auto deduct 1h
     if gross > 5 and start.time() <= time(12, 0) and end.time() >= time(13, 0):
         return 1.0
     return 0.0
+
+def classify_sleep_out(row):
+    nights = pd.to_numeric(row.get('Sleep Out', 0), errors='coerce')
+    if pd.isna(nights) or nights == 0:
+        return 'none', 0
+
+    arrival = str(row.get('Arrival', '')).upper().strip()
+
+    if any(country in arrival for country in CROSSBORDER_COUNTRIES):
+        return 'crossborder', nights
+    if any(town in arrival for town in GEO_FENCE_TOWNS):
+        return 'geofence', 0
+    return 'local', nights
+
+def is_abnormal(fleet_no):
+    return any(fleet_no.startswith(prefix) for prefix in ABNORMAL_FLEETS)
 
 if tracking_file and allocation_file:
     try:
@@ -124,6 +143,8 @@ if tracking_file and allocation_file:
         df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce', dayfirst=True)
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], format='%Y %m %d', errors='coerce')
 
+        df_track['Date_dt'] = df_track['Date']
+        df_alloc['Date_dt'] = df_alloc['Date']
         df_track['Date'] = df_track['Date'].dt.strftime('%Y-%m-%d')
         df_alloc['Date'] = df_alloc['Date'].dt.strftime('%Y-%m-%d')
 
@@ -149,82 +170,132 @@ if tracking_file and allocation_file:
         df_merged['End Time'] = pd.to_datetime(df_merged['End Time'], errors='coerce')
         df_merged['gross_hours'] = (df_merged['End Time'] - df_merged['Start Time']).dt.total_seconds() / 3600
 
-        # 1. Meal Hour: use column or auto-deduct 1h if worked through lunch
         df_merged['meal_hour'] = df_merged.apply(auto_lunch_deduction, axis=1)
 
-        # 2. Paid Yard: Sleep Out + text mentions
-        df_merged['sleep_out'] = pd.to_numeric(df_merged.get('Sleep Out', 0), errors='coerce').fillna(0)
-        if 'Activity Description' in df_merged.columns:
-            df_merged['yard_from_text'] = df_merged['Activity Description'].apply(extract_yard_hours_from_text)
-        else:
-            df_merged['yard_from_text'] = 0.0
-        df_merged['yard_hours'] = df_merged['sleep_out'] + df_merged['yard_from_text']
+        # Sleep out classification
+        sleep_data = df_merged.apply(classify_sleep_out, axis=1, result_type='expand')
+        df_merged['sleep_out_type'] = sleep_data[0]
+        df_merged['sleep_out_nights'] = sleep_data[1]
+        df_merged['sleep_out_local'] = df_merged.apply(lambda x: x['sleep_out_nights'] if x['sleep_out_type'] == 'local' else 0, axis=1)
+        df_merged['sleep_out_crossborder'] = df_merged.apply(lambda x: x['sleep_out_nights'] if x['sleep_out_type'] == 'crossborder' else 0, axis=1)
 
-        # 3. Paid hours = gross - unpaid meal
+        # Yard hours from text only
+        if 'Activity Description' in df_merged.columns:
+            df_merged['yard_hours'] = df_merged['Activity Description'].apply(extract_yard_hours_from_text)
+        else:
+            df_merged['yard_hours'] = 0.0
+
         df_merged['total_hours'] = (df_merged['gross_hours'] - df_merged['meal_hour']).clip(lower=0)
         df_merged['driving_hours'] = (df_merged['total_hours'] - df_merged['yard_hours']).clip(lower=0)
 
-        # Sort
+        df_merged['weekday'] = pd.to_datetime(df_merged['Date']).dt.dayofweek
+        df_merged['is_abnormal'] = df_merged['Fleet Number'].apply(is_abnormal)
+
         df_merged = df_merged.sort_values(['Employee Name', 'Date', 'Start Time'])
 
-        # ===== SUMMARY WITH 195.03 RULE =====
+        # ===== RUNNING 195.03 SPLIT WITH DAY RATES =====
+        df_merged['normal_weekday'] = 0.0
+        df_merged['normal_sat'] = 0.0
+        df_merged['normal_sun'] = 0.0
+        df_merged['ot_weekday'] = 0.0
+        df_merged['ot_sat'] = 0.0
+        df_merged['ot_sun'] = 0.0
+
+        for driver in df_merged['Employee Name'].unique():
+            mask = df_merged['Employee Name'] == driver
+            driver_idx = df_merged.loc[mask].index
+            cumulative_normal = 0.0
+
+            for idx in driver_idx:
+                hours_today = df_merged.at[idx, 'total_hours']
+                weekday = df_merged.at[idx, 'weekday']
+
+                remaining_normal = max(0, NORMAL_HOURS_THRESHOLD - cumulative_normal)
+                normal_today = min(hours_today, remaining_normal)
+                ot_today = hours_today - normal_today
+
+                if weekday == 6: # Sunday
+                    df_merged.at[idx, 'normal_sun'] = normal_today
+                    df_merged.at[idx, 'ot_sun'] = ot_today
+                elif weekday == 5: # Saturday
+                    df_merged.at[idx, 'normal_sat'] = normal_today
+                    df_merged.at[idx, 'ot_sat'] = ot_today
+                else: # Weekday
+                    df_merged.at[idx, 'normal_weekday'] = normal_today
+                    df_merged.at[idx, 'ot_weekday'] = ot_today
+
+                cumulative_normal += normal_today
+
+        # ===== ABNORMAL TRUCK DAY COUNT =====
+        abnormal_days = df_merged[df_merged['is_abnormal'] == True].groupby('Employee Name')['Date'].nunique().reset_index()
+        abnormal_days = abnormal_days.rename(columns={'Date': 'ABNORMAL DAYS'})
+
+        # ===== SUMMARY =====
         driver_totals = df_merged.groupby('Employee Name').agg({
-            'total_hours': 'sum', # already excludes meal
+            'total_hours': 'sum',
+            'normal_weekday': 'sum',
+            'normal_sat': 'sum',
+            'normal_sun': 'sum',
+            'ot_weekday': 'sum',
+            'ot_sat': 'sum',
+            'ot_sun': 'sum',
             'yard_hours': 'sum',
             'driving_hours': 'sum',
-            'meal_hour': 'sum' # show unpaid total for reference
+            'meal_hour': 'sum',
+            'sleep_out_local': 'sum',
+            'sleep_out_crossborder': 'sum'
         }).reset_index()
 
-        driver_totals['NORMAL HOURS'] = driver_totals['total_hours'].clip(upper=NORMAL_HOURS_THRESHOLD)
-        driver_totals['OVERTIME @1.5'] = (driver_totals['total_hours'] - NORMAL_HOURS_THRESHOLD).clip(lower=0)
+        driver_totals = pd.merge(driver_totals, abnormal_days, on='Employee Name', how='left')
+        driver_totals['ABNORMAL DAYS'] = driver_totals['ABNORMAL DAYS'].fillna(0).astype(int)
+
         driver_totals = driver_totals.rename(columns={
             'total_hours': 'PAID HOURS',
+            'normal_weekday': 'NORMAL WD',
+            'normal_sat': 'NORMAL SAT@1.5',
+            'normal_sun': 'NORMAL SUN@2.0',
+            'ot_weekday': 'OT WD@1.5',
+            'ot_sat': 'OT SAT@1.5',
+            'ot_sun': 'OT SUN@2.0',
             'yard_hours': 'YARD',
             'driving_hours': 'DRIVING',
-            'meal_hour': 'UNPAID MEAL'
+            'meal_hour': 'UNPAID MEAL',
+            'sleep_out_local': 'SLEEP OUT LOCAL',
+            'sleep_out_crossborder': 'SLEEP OUT XBORDER'
         })
 
         st.success(f"Allocated {len(df_merged)} trips to {df_merged['Employee Name'].nunique()} drivers!")
 
-        st.subheader(f"Summary - 07:00-17:00 shift, 1h lunch deducted, Overtime after {NORMAL_HOURS_THRESHOLD}h")
-        st.dataframe(driver_totals[['Employee Name', 'PAID HOURS', 'NORMAL HOURS', 'OVERTIME @1.5', 'YARD', 'DRIVING', 'UNPAID MEAL']].round(2))
+        st.subheader(f"Summary - Includes Abnormal Days + Sleep Out Counts")
+        st.dataframe(driver_totals.round(2))
 
-        st.subheader("All Trips")
-        display_cols = ['Date', 'Employee Name', 'Fleet Number', 'Start Time', 'End Time',
-                       'gross_hours', 'meal_hour', 'total_hours', 'yard_hours', 'driving_hours', 'Sleep Out']
+        st.subheader("All Trips with Abnormal Flag")
+        display_cols = ['Date', 'Employee Name', 'Fleet Number', 'is_abnormal', 'Arrival', 'weekday', 'Start Time', 'End Time',
+                       'total_hours', 'normal_weekday', 'normal_sat', 'normal_sun',
+                       'ot_weekday', 'ot_sat', 'ot_sun', 'yard_hours', 'meal_hour',
+                       'sleep_out_local', 'sleep_out_crossborder']
         display_cols = [col for col in display_cols if col in df_merged.columns]
         st.dataframe(df_merged[display_cols].round(2))
 
         # ===== EXCEL EXPORT =====
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            driver_totals[['Employee Name', 'PAID HOURS', 'NORMAL HOURS', 'OVERTIME @1.5', 'YARD', 'DRIVING', 'UNPAID MEAL']].to_excel(
-                writer, index=False, sheet_name='SUMMARY'
-            )
-
+            driver_totals.to_excel(writer, index=False, sheet_name='SUMMARY')
             df_merged[display_cols].to_excel(writer, index=False, sheet_name='ALL TRIPS')
 
-            # One sheet per driver
             for driver in sorted(df_merged['Employee Name'].unique()):
                 df_driver = df_merged[df_merged['Employee Name'] == driver][display_cols].copy()
 
-                subtotal = pd.DataFrame({
-                    'Date': ['TOTAL'],
-                    'Employee Name': [driver],
-                    'Fleet Number': [''],
-                    'Start Time': [pd.NaT],
-                    'End Time': [pd.NaT],
-                    'gross_hours': [df_driver['gross_hours'].sum()],
-                    'meal_hour': [df_driver['meal_hour'].sum()],
-                    'total_hours': [df_driver['total_hours'].sum()],
-                    'yard_hours': [df_driver['yard_hours'].sum()],
-                    'driving_hours': [df_driver['driving_hours'].sum()],
-                    'Sleep Out': [df_driver.get('Sleep Out', pd.Series([0])).sum()]
-                })
+                subtotal_data = {col: [''] for col in display_cols}
+                subtotal_data['Date'] = ['TOTAL']
+                subtotal_data['Employee Name'] = [driver]
+                for col in ['total_hours', 'normal_weekday', 'normal_sat', 'normal_sun',
+                           'ot_weekday', 'ot_sat', 'ot_sun', 'yard_hours', 'meal_hour',
+                           'sleep_out_local', 'sleep_out_crossborder']:
+                    if col in df_driver.columns:
+                        subtotal_data[col] = [df_driver[col].sum()]
 
-                subtotal['NORMAL HOURS'] = subtotal['total_hours'].clip(upper=NORMAL_HOURS_THRESHOLD)
-                subtotal['OVERTIME @1.5'] = (subtotal['total_hours'] - NORMAL_HOURS_THRESHOLD).clip(lower=0)
-
+                subtotal = pd.DataFrame(subtotal_data)
                 df_driver_out = pd.concat([df_driver, subtotal], ignore_index=True)
                 sheet_name = re.sub(r'[\\/*?:\[\]]', '', driver)[:31]
                 df_driver_out.to_excel(writer, index=False, sheet_name=sheet_name)
@@ -232,7 +303,7 @@ if tracking_file and allocation_file:
         output.seek(0)
 
         st.download_button(
-            "📥 Download Excel - 1 Sheet Per Driver + Summary",
+            "📥 Download Excel - With Abnormal Days",
             output,
             "fleet_timesheet_processed.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -240,5 +311,6 @@ if tracking_file and allocation_file:
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
+        st.exception(e)
 else:
     st.info("👆 Upload both files to start processing")
