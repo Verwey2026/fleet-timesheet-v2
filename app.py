@@ -19,8 +19,8 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V4.0", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 4.0 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V4.2", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 4.2 - Verwey Vervoer")
 
 st.markdown("Allocates drivers to Fleet Numbers and calculates **Normal Hours, Overtime @1.5, Yard Hours**.")
 
@@ -74,18 +74,18 @@ def standardize_columns(df):
 
 if tracking_file and allocation_file:
     try:
-        # Read tracking file - auto detect header
+        # Read tracking file
         df_track_raw = pd.read_excel(tracking_file, header=None)
         track_header = find_tracking_header(df_track_raw)
         df_track = pd.read_excel(tracking_file, header=track_header)
         df_track = standardize_columns(df_track)
 
-        # Read allocation file - clean format, header row 0
+        # Read allocation file
         xls = pd.ExcelFile(allocation_file)
         all_alloc_dfs = []
         
         for sheet_name in xls.sheet_names:
-            df_sheet = pd.read_excel(xls, sheet_name=sheet_name)  # Header = row 1
+            df_sheet = pd.read_excel(xls, sheet_name=sheet_name)
             df_sheet = standardize_columns(df_sheet)
             df_sheet['Employee Name'] = sheet_name
             all_alloc_dfs.append(df_sheet)
@@ -101,12 +101,21 @@ if tracking_file and allocation_file:
             if 'Start Time' in df_track.columns:
                 df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce')
             else:
-                st.error(f"Tracking file missing both 'Date' and 'Start Time' columns. Found: {list(df_track.columns)}")
+                st.error(f"Tracking file missing 'Date' and 'Start Time'. Found: {list(df_track.columns)}")
                 st.stop()
         
-        # Parse dates - handles '2026 02 21' format
-        df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
-        df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
+        # DEBUG: Show raw date values
+        st.write("**Allocation Date sample before parsing:**", df_alloc['Date'].head(5).tolist())
+        
+        # Parse dates - handle 'YYYY MM DD' format specifically
+        df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce', dayfirst=True)
+        # For allocation: try 'YYYY MM DD' first, then fallback
+        df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], format='%Y %m %d', errors='coerce')
+        
+        st.write("**NaT count in Allocation Date after parsing:**", df_alloc['Date'].isna().sum())
+        
+        df_track['Date'] = df_track['Date'].dt.strftime('%Y-%m-%d')
+        df_alloc['Date'] = df_alloc['Date'].dt.strftime('%Y-%m-%d')
         
         # Standardize Fleet Number
         df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip().str.upper()
@@ -121,7 +130,7 @@ if tracking_file and allocation_file:
         st.write(f"After cleaning - Tracking: {len(df_track)}, Allocation: {len(df_alloc)}")
 
         if df_alloc.empty:
-            st.error("Allocation data is empty after cleaning. Make sure FLEET column has values for worked days.")
+            st.error("Allocation data is empty after cleaning.")
             st.stop()
 
         df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
