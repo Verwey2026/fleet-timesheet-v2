@@ -19,14 +19,14 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V4.3", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 4.3 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V4.4", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 4.4 - Verwey Vervoer")
 
-st.markdown("Allocates drivers to Fleet Numbers and calculates **Normal Hours, Overtime @1.5, Yard Hours**.")
+st.markdown("Allocates drivers to Fleet Numbers. **Overtime @1.5 only after 195.03 hours per driver per period.**")
 
-NORMAL_HOURS_PER_DAY = 9.0
-st.sidebar.subheader("Settings")
-NORMAL_HOURS_PER_DAY = st.sidebar.number_input("Normal Hours Per Day", value=9.0, step=0.5)
+NORMAL_HOURS_THRESHOLD = 195.03
+st.sidebar.subheader("NBCRFLI Settings")
+NORMAL_HOURS_THRESHOLD = st.sidebar.number_input("Normal Hours Threshold", value=195.03, step=0.01, help="First X hours are Normal. Overtime starts after this.")
 
 col1, col2 = st.columns(2)
 
@@ -74,13 +74,13 @@ def standardize_columns(df):
 
 if tracking_file and allocation_file:
     try:
-        # Read tracking file - auto detect header
+        # Read tracking file
         df_track_raw = pd.read_excel(tracking_file, header=None)
         track_header = find_tracking_header(df_track_raw)
         df_track = pd.read_excel(tracking_file, header=track_header)
         df_track = standardize_columns(df_track)
 
-        # Read allocation file - header row 0
+        # Read allocation file
         xls = pd.ExcelFile(allocation_file)
         all_alloc_dfs = []
         
@@ -104,14 +104,9 @@ if tracking_file and allocation_file:
                 st.error(f"Tracking file missing 'Date' and 'Start Time'. Found: {list(df_track.columns)}")
                 st.stop()
         
-        # DEBUG: Show raw date values
-        st.write("**Allocation Date sample before parsing:**", df_alloc['Date'].head(5).tolist())
-        
-        # Parse dates - allocation uses 'YYYY MM DD' format
+        # Parse dates
         df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce', dayfirst=True)
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], format='%Y %m %d', errors='coerce')
-        
-        st.write("**NaT count in Allocation Date after parsing:**", df_alloc['Date'].isna().sum())
         
         df_track['Date'] = df_track['Date'].dt.strftime('%Y-%m-%d')
         df_alloc['Date'] = df_alloc['Date'].dt.strftime('%Y-%m-%d')
@@ -130,7 +125,6 @@ if tracking_file and allocation_file:
 
         if df_alloc.empty:
             st.error("Allocation data is empty after cleaning.")
-            st.info("Make sure FLEET column has values for days the driver worked.")
             st.stop()
 
         df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
@@ -144,6 +138,7 @@ if tracking_file and allocation_file:
                 st.dataframe(df_alloc[['Fleet Number', 'Date']].drop_duplicates().head(10))
             st.stop()
 
+        # Calculate hours per trip
         if 'Activity Description' in df_merged.columns:
             df_merged['yard_hours'] = df_merged['Activity Description'].apply(extract_yard_hours)
         else:
@@ -153,28 +148,37 @@ if tracking_file and allocation_file:
         df_merged['End Time'] = pd.to_datetime(df_merged['End Time'], errors='coerce')
         df_merged['total_hours'] = (df_merged['End Time'] - df_merged['Start Time']).dt.total_seconds() / 3600
         df_merged['driving_hours'] = (df_merged['total_hours'] - df_merged['yard_hours']).clip(lower=0)
-        df_merged['normal_hours'] = df_merged['total_hours'].clip(upper=NORMAL_HOURS_PER_DAY)
-        df_merged['overtime_hours'] = (df_merged['total_hours'] - NORMAL_HOURS_PER_DAY).clip(lower=0)
-
-        display_cols = ['Date', 'Employee Name', 'Fleet Number', 'Start Time', 'End Time', 
-                       'total_hours', 'normal_hours', 'overtime_hours', 'yard_hours', 'driving_hours']
-        display_cols = [col for col in display_cols if col in df_merged.columns]
+        
+        # NEW LOGIC: Calculate normal vs overtime AFTER grouping by driver
+        driver_totals = df_merged.groupby('Employee Name').agg({
+            'total_hours': 'sum',
+            'yard_hours': 'sum'
+        }).reset_index()
+        
+        driver_totals['normal_hours'] = driver_totals['total_hours'].clip(upper=NORMAL_HOURS_THRESHOLD)
+        driver_totals['overtime_hours'] = (driver_totals['total_hours'] - NORMAL_HOURS_THRESHOLD).clip(lower=0)
+        driver_totals = driver_totals.rename(columns={
+            'total_hours': 'TOTAL HOURS',
+            'normal_hours': 'NORMAL HOURS',
+            'overtime_hours': 'OVERTIME @1.5',
+            'yard_hours': 'YARD'
+        })
         
         st.success(f"Allocated {len(df_merged)} trips to drivers!")
         
-        summary = df_merged.groupby('Employee Name')[['total_hours', 'normal_hours', 'overtime_hours', 'yard_hours']].sum().round(2)
-        summary.columns = ['TOTAL HOURS', 'NORMAL HOURS', 'OVERTIME @1.5', 'YARD']
+        st.subheader(f"Summary by Driver - First {NORMAL_HOURS_THRESHOLD} hours = Normal")
+        st.dataframe(driver_totals.round(2))
         
-        st.subheader("Summary by Driver - NBCRFLI Format")
-        st.dataframe(summary)
-        
-        st.subheader("Detailed Trips")
+        st.subheader("Detailed Trips - Individual trip hours")
+        display_cols = ['Date', 'Employee Name', 'Fleet Number', 'Start Time', 'End Time', 
+                       'total_hours', 'yard_hours', 'driving_hours']
+        display_cols = [col for col in display_cols if col in df_merged.columns]
         st.dataframe(df_merged[display_cols].round(2))
 
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_merged[display_cols].to_excel(writer, index=False, sheet_name='Detailed')
-            summary.to_excel(writer, sheet_name='Summary')
+            df_merged[display_cols].to_excel(writer, index=False, sheet_name='Detailed Trips')
+            driver_totals.to_excel(writer, index=False, sheet_name='Summary')
         output.seek(0)
         
         st.download_button("📥 Download Excel with Summary", output, "fleet_timesheet_processed.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
