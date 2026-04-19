@@ -32,7 +32,7 @@ with col1:
 
 with col2:
     st.subheader("2. Upload Driver Allocation")
-    allocation_file = st.file_uploader("Multi-sheet: Sheet = Driver, Uses Activity Description col", type=["xlsx", "xls"], key="allocation")
+    allocation_file = st.file_uploader("Multi-sheet: Sheet = Driver, Uses unnamed 11 for activity", type=["xlsx", "xls"], key="allocation")
 
 def find_header_row(df_raw):
     for idx, row in df_raw.iterrows():
@@ -54,8 +54,8 @@ def clean_col_name(col):
 def standardize_columns(df):
     rename_map = {
         'date': 'Date', 'trip date': 'Date', 'day': 'Date',
-        'driver': 'Employee Name', 'employee': 'Employee Name', 'employee name': 'Employee Name', 'name': 'Employee Name',
-        'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'activity description': 'Activity Description',
+        'driver': 'Employee Name', 'employee': 'Employee Name', 'employee name': 'Employee Name', 'name': 'Employee Name', 'phh': 'Employee Name',
+        'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'activity description': 'Activity Description', 'unnamed 11': 'Activity Description',
         'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time',
         'end': 'End Time', 'end time': 'End Time', 'arrival time': 'End Time', 'last movement': 'End Time',
         'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number', 
