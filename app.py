@@ -52,10 +52,13 @@ def clean_col_name(col):
     return str(col).strip().lower().replace(':', '').replace('.', '').strip()
 
 def standardize_columns(df):
+    # Show original columns for debugging
+    original_cols = list(df.columns)
+    
     rename_map = {
         'date': 'Date', 'trip date': 'Date', 'day': 'Date',
         'driver': 'Employee Name', 'employee': 'Employee Name', 'employee name': 'Employee Name', 'name': 'Employee Name', 'phh': 'Employee Name',
-        'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'activity description': 'Activity Description',
+        'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'activity description': 'Activity Description', 'unnamed 11': 'Activity Description',
         'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time',
         'end': 'End Time', 'end time': 'End Time', 'arrival time': 'End Time', 'last movement': 'End Time',
         'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number', 
@@ -93,15 +96,16 @@ if tracking_file and allocation_file:
         
         df_alloc = pd.concat(all_alloc_dfs, ignore_index=True)
 
-        # CRITICAL: Create Date from Start Time if tracking file has no Date column
+        # Create Date from Start Time if tracking file has no Date column
         if 'Date' not in df_track.columns:
             if 'Start Time' in df_track.columns:
                 df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce').dt.date
             else:
                 st.error("Tracking file missing both 'Date' and 'Start Time' columns")
+                st.write("Tracking columns:", list(df_track.columns))
                 st.stop()
         
-        # Now force both Date and Fleet Number to same type for merge
+        # Force both Date and Fleet Number to same type for merge
         df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce').dt.date
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce').dt.date
         df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip()
