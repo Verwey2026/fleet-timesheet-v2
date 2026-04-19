@@ -93,7 +93,15 @@ if tracking_file and allocation_file:
         
         df_alloc = pd.concat(all_alloc_dfs, ignore_index=True)
 
-        # CRITICAL FIX: Force both Date and Fleet Number to same type before merge
+        # CRITICAL: Create Date from Start Time if tracking file has no Date column
+        if 'Date' not in df_track.columns:
+            if 'Start Time' in df_track.columns:
+                df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce').dt.date
+            else:
+                st.error("Tracking file missing both 'Date' and 'Start Time' columns")
+                st.stop()
+        
+        # Now force both Date and Fleet Number to same type for merge
         df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce').dt.date
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce').dt.date
         df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip()
@@ -117,7 +125,7 @@ if tracking_file and allocation_file:
         df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
 
         if df_merged.empty:
-            st.error("No matching rows found between files. Check that Fleet Number and Date values match exactly.")
+            st.error("No matching rows found. Fleet Number and Date must match exactly between files.")
             st.write("**Tracking sample:**")
             st.dataframe(df_track[['Fleet Number', 'Date']].head())
             st.write("**Allocation sample:**")
