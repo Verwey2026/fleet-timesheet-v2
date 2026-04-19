@@ -19,8 +19,8 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V3.0", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 3.0 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V3.1", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 3.1 - Verwey Vervoer")
 
 st.markdown("Allocates drivers to Fleet Numbers and calculates **Normal Hours, Overtime @1.5, Yard Hours**.")
 
@@ -73,9 +73,13 @@ def standardize_columns(df):
     return df
 
 def parse_date_flexible(date_val):
-    """Handles '2026-02-21 0', '21 02 2026', Excel serials, etc"""
+    """Handles datetime objects, '2026-02-21 0', '21 02 2026', Excel serials"""
     if pd.isna(date_val):
         return pd.NaT
+    
+    # If it's already a datetime, just return it
+    if isinstance(date_val, pd.Timestamp) or isinstance(date_val, pd.DatetimeTZDtype):
+        return date_val
     
     date_str = str(date_val).strip()
     
@@ -94,7 +98,7 @@ def parse_date_flexible(date_val):
 
 if tracking_file and allocation_file:
     try:
-        # Read tracking file - auto detect header
+        # Read tracking file
         df_track_raw = pd.read_excel(tracking_file, header=None)
         track_header = find_header_row(df_track_raw)
         df_track = pd.read_excel(tracking_file, header=track_header)
@@ -124,9 +128,20 @@ if tracking_file and allocation_file:
                 st.error(f"Tracking file missing both 'Date' and 'Start Time' columns. Found: {list(df_track.columns)}")
                 st.stop()
         
-        # Parse dates
-        df_track['Date'] = df_track['Date'].apply(parse_date_flexible).dt.strftime('%Y-%m-%d')
-        df_alloc['Date'] = df_alloc['Date'].apply(parse_date_flexible).dt.strftime('%Y-%m-%d')
+        # Parse dates - show types before parsing
+        st.write("**Allocation Date column types before parsing:**")
+        st.write(df_alloc['Date'].apply(type).value_counts())
+        st.write("**Sample Date values:**", df_alloc['Date'].head(10).tolist())
+        
+        df_track['Date'] = df_track['Date'].apply(parse_date_flexible)
+        df_alloc['Date'] = df_alloc['Date'].apply(parse_date_flexible)
+        
+        st.write("**Allocation Date after parsing:**")
+        st.dataframe(df_alloc[['Fleet Number', 'Date', 'Employee Name']].head(10))
+        st.write("**Date NaT count:**", df_alloc['Date'].isna().sum())
+        
+        df_track['Date'] = df_track['Date'].dt.strftime('%Y-%m-%d')
+        df_alloc['Date'] = df_alloc['Date'].dt.strftime('%Y-%m-%d')
         
         # Standardize Fleet Number
         df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip().str.upper()
@@ -142,7 +157,7 @@ if tracking_file and allocation_file:
         st.write(f"Allocation rows AFTER dropna: {len(df_alloc)}")
 
         if df_alloc.empty:
-            st.error("Allocation data is empty after cleaning.")
+            st.error("Allocation data is empty after cleaning. Check 'Date NaT count' above - if it's high, dates aren't parsing.")
             st.stop()
 
         # Merge
