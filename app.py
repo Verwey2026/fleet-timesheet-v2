@@ -32,7 +32,7 @@ with col1:
 
 with col2:
     st.subheader("2. Upload Driver Allocation")
-    allocation_file = st.file_uploader("Must have: Date, Employee Name, Fleet Number, Activity Description", type=["xlsx", "xls"], key="allocation")
+    allocation_file = st.file_uploader("Must have: Date in Col B, Employee Name, Fleet Number, Activity Description", type=["xlsx", "xls"], key="allocation")
 
 def find_header_row(df_raw):
     for idx, row in df_raw.iterrows():
@@ -85,6 +85,11 @@ if tracking_file and allocation_file:
             df_sheet = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
             df_sheet = standardize_columns(df_sheet)
             
+            # FIX: If Date column is missing or all None, use Column B (index 1)
+            if 'Date' not in df_sheet.columns or df_sheet['Date'].isna().all():
+                if len(df_sheet.columns) > 1:
+                    df_sheet['Date'] = df_sheet.iloc[:, 1]  # Column B
+            
             # Use sheet name as Employee Name if column is missing or empty
             if 'Employee Name' not in df_sheet.columns or df_sheet['Employee Name'].isna().all():
                 df_sheet['Employee Name'] = sheet_name
@@ -102,7 +107,7 @@ if tracking_file and allocation_file:
                 st.write("Tracking columns:", list(df_track.columns))
                 st.stop()
         
-        # CRITICAL FIX: Convert BOTH Date columns to string YYYY-MM-DD for merge
+        # Convert BOTH Date columns to string YYYY-MM-DD for merge
         df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
         
@@ -124,7 +129,7 @@ if tracking_file and allocation_file:
             st.error(f"Allocation file missing: {missing_alloc}. Found: {list(df_alloc.columns)}")
             st.stop()
 
-        # Merge on Fleet Number + Date - now both are strings
+        # Merge on Fleet Number + Date
         df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
 
         if df_merged.empty:
