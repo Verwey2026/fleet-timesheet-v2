@@ -22,10 +22,10 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V4.17", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 4.17 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V4.18", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 4.18 - Verwey Vervoer")
 
-st.markdown("**Rules:** 195.03 fills M-F first. Sat/Sun only if M-F short. Sleep out from End Location link. Geo fence = Middelburg.")
+st.markdown("**Rules:** 195.03 fills M-F first across whole period. Then Sat, then Sun. Sleep out from End Location link.")
 
 NORMAL_HOURS_THRESHOLD = 195.03
 GEO_FENCE_KEYWORDS = ['MIDDELBURG', 'STEVE TSHWETE']
@@ -48,9 +48,8 @@ with col2:
     allocation_file = st.file_uploader("Sheet = Driver, Headers: DAY | DATE | FLEET | MEAL HOUR | SLEEP OUT", type=["xlsx", "xls"], key="allocation")
 
 def extract_location_from_hyperlink(cell):
-    """Extract location from cell value OR hyperlink. Handles Excel links."""
+    """Extract location from cell value OR hyperlink"""
     if cell.hyperlink:
-        # Use hyperlink target
         link = str(cell.hyperlink.target).upper()
     else:
         link = str(cell.value).upper() if cell.value else ''
@@ -58,7 +57,6 @@ def extract_location_from_hyperlink(cell):
     if not link or link == 'NONE':
         return ''
 
-    # Extract from Google Maps URL
     if 'GOOGLE.COM/MAPS' in link or 'HTTP' in link:
         match = re.search(r'/PLACE/([^/@]+)', link)
         if match:
@@ -105,6 +103,13 @@ def read_tracking_with_links(file):
 
     return pd.DataFrame(data)
 
+def extract_yard_hours_from_text(text):
+    if pd.isna(text): return 0.0
+    text = str(text).lower()
+    match = re.search(r'(\d+\.?\d*)\s*h(?:our)?s?\s*yard|yard[:\s]*(\d+\.?\d*)', text)
+    if match: return float(match.group(1) or match.group(2))
+    return 0.0
+
 def clean_col_name(col):
     return str(col).strip().lower().replace(':', '').replace('.', '').strip()
 
@@ -113,14 +118,14 @@ def standardize_columns(df):
         'date': 'Date', 'trip date': 'Date', 'tripdate': 'Date',
         'driver': 'Employee Name', 'employee': 'Employee Name', 'employee name': 'Employee Name', 'name': 'Employee Name', 'phh': 'Employee Name',
         'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'activity description': 'Activity Description', 'unnamed 11': 'Activity Description',
-        'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time', 'departure': 'Start Time', 'starttime': 'Start Time',
-        'end': 'End Time', 'end time': 'End Time', 'arrival time': 'End Time', 'last movement': 'End Time', 'arrival': 'End Time', 'endtime': 'End Time',
+        'departure time': 'Start Time', 'start time': 'Start Time', 'first movement': 'Start Time', 'departure': 'Start Time', 'starttime': 'Start Time',
+        'arrival time': 'End Time', 'end time': 'End Time', 'last movement': 'End Time', 'arrival': 'End Time', 'endtime': 'End Time',
         'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number',
         'reg': 'Fleet Number', 'registration': 'Fleet Number', 'registration nr': 'Fleet Number', 'reg nr': 'Fleet Number', 'fleet number': 'Fleet Number', 'reg no': 'Fleet Number', 'registration nr.': 'Fleet Number',
         'meal hour': 'Meal Hour', 'meal': 'Meal Hour', 'meal hours': 'Meal Hour',
         'sleep out': 'Sleep Out', 'sleep': 'Sleep Out', 'sleepout': 'Sleep Out',
-        'end location': 'End Location', 'arrival location': 'End Location', 'last location': 'End Location',
-        'start location': 'Start Location', 'departure location': 'Start Location'
+        'end location': 'End Location', 'arrival location': 'End Location', 'last location': 'End Location', 'destination': 'End Location',
+        'start location': 'Start Location', 'departure location': 'Start Location', 'origin': 'Start Location'
     }
     df.columns = [clean_col_name(col) for col in df.columns]
     for old, new in rename_map.items():
@@ -141,7 +146,6 @@ def auto_lunch_deduction(row):
     return 0.0
 
 def classify_sleep_out(row):
-    """Based on End Location = last location"""
     nights = pd.to_numeric(row.get('Sleep Out', 0), errors='coerce')
     if pd.isna(nights) or nights == 0:
         return 0, 0
@@ -149,10 +153,10 @@ def classify_sleep_out(row):
     location = str(row.get('End Location', '')).upper()
 
     if any(country in location for country in CROSSBORDER_COUNTRIES):
-        return 0, nights # xborder
+        return 0, nights
     if any(town in location for town in GEO_FENCE_KEYWORDS):
-        return 0, 0 # geo fence
-    return nights, 0 # local
+        return 0, 0
+    return nights, 0
 
 def is_abnormal(fleet_no):
     return any(fleet_no.startswith(prefix) for prefix in ABNORMAL_FLEETS)
@@ -179,8 +183,8 @@ if tracking_file and allocation_file:
 
         df_alloc = pd.concat(all_alloc_dfs, ignore_index=True)
 
-        # Date handling
-        df_track['Date'] = pd.to_datetime(df_track['Departure Time'], errors='coerce', dayfirst=True)
+        # Date handling - use Start Time after standardization
+        df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce', dayfirst=True)
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], format='%Y %m %d', errors='coerce')
 
         df_track['Date'] = df_track['Date'].dt.strftime('%Y-%m-%d')
@@ -190,10 +194,10 @@ if tracking_file and allocation_file:
         df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip().str.upper()
         df_alloc['Fleet Number'] = df_alloc['Fleet Number'].astype(str).str.strip().str.upper()
 
-        df_track = df_track.dropna(subset=['Fleet Number', 'Date', 'Departure Time', 'Arrival Time'])
+        df_track = df_track.dropna(subset=['Fleet Number', 'Date', 'Start Time', 'End Time'])
         df_alloc = df_alloc.dropna(subset=['Fleet Number', 'Date'])
 
-        # CRITICAL: Keep SLEEP OUT from allocation
+        # Merge - explicitly keep Sleep Out and Meal Hour
         df_merged = pd.merge(df_track, df_alloc[['Fleet Number', 'Date', 'Sleep Out', 'Meal Hour']], on=['Fleet Number', 'Date'], how='inner')
 
         if df_merged.empty:
@@ -201,8 +205,8 @@ if tracking_file and allocation_file:
             st.stop()
 
         # ===== HOURS CALCULATION =====
-        df_merged['Start Time'] = pd.to_datetime(df_merged['Departure Time'], errors='coerce')
-        df_merged['End Time'] = pd.to_datetime(df_merged['Arrival Time'], errors='coerce')
+        df_merged['Start Time'] = pd.to_datetime(df_merged['Start Time'], errors='coerce')
+        df_merged['End Time'] = pd.to_datetime(df_merged['End Time'], errors='coerce')
         df_merged['gross_hours'] = (df_merged['End Time'] - df_merged['Start Time']).dt.total_seconds() / 3600
 
         df_merged['meal_hour'] = df_merged.apply(auto_lunch_deduction, axis=1)
@@ -240,13 +244,10 @@ if tracking_file and allocation_file:
 
             # PASS 1: Process ALL Mon-Fri and cap at 195.03
             mf_mask = driver_mask & (df_merged['weekday'] < 5)
-            mf_indices = df_merged[mf_mask].index
             mf_cumsum = 0.0
-
-            for idx in mf_indices:
+            for idx in df_merged[mf_mask].index:
                 hours_today = df_merged.at[idx, 'total_hours']
-                can_take_normal = max(0, NORMAL_HOURS_THRESHOLD - mf_cumsum)
-                normal_today = min(hours_today, can_take_normal)
+                normal_today = min(hours_today, max(0, NORMAL_HOURS_THRESHOLD - mf_cumsum))
                 ot_today = hours_today - normal_today
                 df_merged.at[idx, 'normal_weekday'] = normal_today
                 df_merged.at[idx, 'ot_weekday'] = ot_today
@@ -355,7 +356,7 @@ if tracking_file and allocation_file:
         output.seek(0)
 
         st.download_button(
-            "📥 Download Excel - V4.17",
+            "📥 Download Excel - V4.18",
             output,
             "fleet_timesheet_processed.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
