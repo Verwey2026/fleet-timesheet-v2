@@ -37,7 +37,7 @@ with col2:
 def find_header_row(df_raw):
     for idx, row in df_raw.iterrows():
         row_str = ' '.join([str(x) for x in row.values]).lower()
-        if any(word in row_str for word in ['date', 'fleet', 'start', 'reg', 'employee']):
+        if any(word in row_str for word in ['date', 'fleet', 'start', 'reg', 'registration', 'employee']):
             return idx
     return 0
 
@@ -55,7 +55,8 @@ def standardize_columns(df):
         'notes': 'Activity Description', 'description': 'Activity Description', 'activity': 'Activity Description', 'comments': 'Activity Description', 'remarks': 'Activity Description',
         'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time',
         'end': 'End Time', 'end time': 'End Time', 'arrival time': 'End Time', 'last movement': 'End Time',
-        'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number', 'reg': 'Fleet Number', 'registration': 'Fleet Number'
+        'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number', 
+        'reg': 'Fleet Number', 'registration': 'Fleet Number', 'registration nr': 'Fleet Number', 'reg nr': 'Fleet Number', 'reg. nr': 'Fleet Number'
     }
     df.columns = [str(col).strip().rstrip(':') for col in df.columns]
     for old, new in rename_map.items():
@@ -71,11 +72,9 @@ if tracking_file and allocation_file:
         df_track = standardize_columns(df_track)
         df_alloc = standardize_columns(df_alloc)
 
-        # Extract Date from Start Time in tracking file
-        if 'Date' not in df_track.columns and 'Start Time' in df_track.columns:
-            df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce').dt.date
-        
-        # Convert allocation Date to date type for matching
+        # Convert Date columns to date type for matching
+        if 'Date' in df_track.columns:
+            df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce').dt.date
         if 'Date' in df_alloc.columns:
             df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce').dt.date
 
