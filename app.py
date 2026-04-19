@@ -22,10 +22,10 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V4.19", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 4.19 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V4.22", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 4.22 - Verwey Vervoer")
 
-st.markdown("**Rules:** 195.03 fills M-F first across whole period. Then Sat, then Sun. Sleep out from End Location.")
+st.markdown("**Rules:** 195.03 fills M-F first. Sleep out type = LOCAL / XBORDER / NONE from End Location link.")
 
 NORMAL_HOURS_THRESHOLD = 195.03
 GEO_FENCE_KEYWORDS = ['MIDDELBURG', 'STEVE TSHWETE']
@@ -35,38 +35,59 @@ ABNORMAL_FLEETS = ['FL221', 'FL222', 'FL223', 'FL225', 'FL229', 'FL230', 'FL238'
 st.sidebar.subheader("NBCRFLI Settings")
 NORMAL_HOURS_THRESHOLD = st.sidebar.number_input("Normal Hours Threshold", value=195.03, step=0.01)
 st.sidebar.markdown(f"**Abnormal Fleets:** {', '.join(ABNORMAL_FLEETS)}")
-st.sidebar.markdown(f"**Geo Fence:** {', '.join(GEO_FENCE_KEYWORDS)}")
+st.sidebar.markdown(f"**Geo Fence (0 allowance):** {', '.join(GEO_FENCE_KEYWORDS)}")
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("1. Upload Tracking Report")
-    tracking_file = st.file_uploader("First and Last Movement with End Location", type=["xlsx", "xls"], key="tracking")
+    tracking_file = st.file_uploader("Must have End Location column", type=["xlsx", "xls"], key="tracking")
 
 with col2:
     st.subheader("2. Upload Driver Allocation")
     allocation_file = st.file_uploader("Sheet = Driver, Headers: DAY | DATE | FLEET | MEAL HOUR | SLEEP OUT", type=["xlsx", "xls"], key="allocation")
 
-def extract_location_from_hyperlink(cell):
-    if cell.hyperlink:
-        link = str(cell.hyperlink.target).upper()
+def extract_location_from_cell(cell):
+    """Extract location from hyperlink, formula, or value. Handles blank display text."""
+    link = ''
+
+    # Priority 1: Excel hyperlink object
+    if cell.hyperlink and cell.hyperlink.target:
+        link = str(cell.hyperlink.target)
+    # Priority 2: HYPERLINK formula =HYPERLINK("url","text")
+    elif isinstance(cell.value, str) and cell.value.startswith('=HYPERLINK'):
+        match = re.search(r'HYPERLINK\("([^"]+)"', cell.value)
+        if match:
+            link = match.group(1)
+    # Priority 3: Plain text
     else:
-        link = str(cell.value).upper() if cell.value else ''
+        link = str(cell.value) if cell.value else ''
+
+    link = link.upper().strip()
     if not link or link == 'NONE':
         return ''
-    if 'GOOGLE.COM/MAPS' in link or 'HTTP' in link:
-        match = re.search(r'/PLACE/([^/@]+)', link)
+
+    # Extract town from Google Maps URL
+    if 'GOOGLE.COM/MAPS' in link or 'MAPS.APP.GOO.GL' in link or 'HTTP' in link:
+        # Try /place/Town,+Province
+        match = re.search(r'/PLACE/([^/@?]+)', link)
         if match:
             return unquote(match.group(1).replace('+', ' '))
+        # Try?q=Town
         match = re.search(r'[?&]Q=([^&]+)', link)
         if match:
             return unquote(match.group(1).replace('+', ' '))
+        # Try /@lat,lng,zoom
+        match = re.search(r'/@[-0-9.]+,[-0-9.]+', link)
+        if match:
+            return 'COORDINATES_FOUND' # Can't determine town from coords alone
+
     return link
 
 def read_tracking_with_links(file):
-    wb = openpyxl.load_workbook(file, data_only=True)
+    """Read tracking file. data_only=False to access hyperlinks and formulas."""
+    wb = openpyxl.load_workbook(file, data_only=False) # CRITICAL: False to get hyperlinks
     ws = wb.active
-
     header_row = None
     for idx, row in enumerate(ws.iter_rows(values_only=True), 1):
         row_str = ' '.join([str(x).upper() for x in row if x])
@@ -77,7 +98,6 @@ def read_tracking_with_links(file):
         header_row = 1
 
     headers = [str(cell.value).strip() if cell.value else f'Unnamed_{i}' for i, cell in enumerate(ws[header_row])]
-
     end_loc_idx = None
     for i, h in enumerate(headers):
         if 'END LOCATION' in h.upper():
@@ -90,11 +110,10 @@ def read_tracking_with_links(file):
         for i, cell in enumerate(row):
             col_name = headers[i]
             if i == end_loc_idx:
-                row_data[col_name] = extract_location_from_hyperlink(cell)
+                row_data[col_name] = extract_location_from_cell(cell)
             else:
                 row_data[col_name] = cell.value
         data.append(row_data)
-
     return pd.DataFrame(data)
 
 def extract_yard_hours_from_text(text):
@@ -105,7 +124,7 @@ def extract_yard_hours_from_text(text):
     return 0.0
 
 def clean_col_name(col):
-    return str(col).strip().lower().replace(':', '').replace('.', '').strip()
+    return str(col).strip().lower().replace(':', '').replace('.', '').replace('_', ' ').strip()
 
 def standardize_columns(df):
     rename_map = {
@@ -124,7 +143,6 @@ def standardize_columns(df):
     df.columns = [clean_col_name(col) for col in df.columns]
     for old, new in rename_map.items():
         df.columns = [new if old == col else col for col in df.columns]
-
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
@@ -139,30 +157,33 @@ def auto_lunch_deduction(row):
         return 1.0
     return 0.0
 
-def classify_sleep_out(row):
+def classify_sleep_out_type(row):
+    """Returns: 'LOCAL', 'XBORDER', 'NONE', or 'UNKNOWN'"""
     nights = pd.to_numeric(row.get('Sleep Out', 0), errors='coerce')
     if pd.isna(nights) or nights == 0:
-        return 0, 0
-    location = str(row.get('End Location', '')).upper()
+        return 'NONE'
+
+    location = str(row.get('End Location', '')).upper().strip()
+
+    if not location or location == 'COORDINATES_FOUND':
+        return 'UNKNOWN' # Sleep out claimed but location can't be determined
+
     if any(country in location for country in CROSSBORDER_COUNTRIES):
-        return 0, nights
+        return 'XBORDER'
     if any(town in location for town in GEO_FENCE_KEYWORDS):
-        return 0, 0
-    return nights, 0
+        return 'NONE' # Geo fence = 0 allowance
+    return 'LOCAL'
 
 def is_abnormal(fleet_no):
     return any(fleet_no.startswith(prefix) for prefix in ABNORMAL_FLEETS)
 
 if tracking_file and allocation_file:
     try:
-        # Read tracking with hyperlink support
         df_track = read_tracking_with_links(tracking_file)
         df_track = standardize_columns(df_track)
 
-        # Read allocation
         xls = pd.ExcelFile(allocation_file)
         all_alloc_dfs = []
-
         for sheet_name in xls.sheet_names:
             df_sheet = pd.read_excel(xls, sheet_name=sheet_name)
             df_sheet = standardize_columns(df_sheet)
@@ -175,10 +196,17 @@ if tracking_file and allocation_file:
 
         df_alloc = pd.concat(all_alloc_dfs, ignore_index=True)
 
+        with st.expander("Debug: Allocation file check"):
+            st.write(f"Allocation columns: {list(df_alloc.columns)}")
+            if 'Sleep Out' in df_alloc.columns:
+                st.write(f"Sleep Out total nights: {df_alloc['Sleep Out'].sum():.0f}")
+            else:
+                st.error("SLEEP OUT column not found! Check header spelling.")
+            st.dataframe(df_alloc.head())
+
         # Date handling
         df_track['Date'] = pd.to_datetime(df_track['Start Time'], errors='coerce', dayfirst=True)
         df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], format='%Y %m %d', errors='coerce')
-
         df_track['Date'] = df_track['Date'].dt.strftime('%Y-%m-%d')
         df_alloc['Date'] = df_alloc['Date'].dt.strftime('%Y-%m-%d')
 
@@ -189,14 +217,17 @@ if tracking_file and allocation_file:
         df_track = df_track.dropna(subset=['Fleet Number', 'Date', 'Start Time', 'End Time'])
         df_alloc = df_alloc.dropna(subset=['Fleet Number', 'Date'])
 
-        # CRITICAL FIX: Left merge so all tracking rows kept, allocation data joined
-        df_merged = pd.merge(df_track, df_alloc[['Fleet Number', 'Date', 'Employee Name', 'Sleep Out', 'Meal Hour']],
-                            on=['Fleet Number', 'Date'], how='left', indicator='MERGE_CHECK')
+        merge_cols = ['Fleet Number', 'Date', 'Employee Name']
+        if 'Sleep Out' in df_alloc.columns:
+            merge_cols.append('Sleep Out')
+        if 'Meal Hour' in df_alloc.columns:
+            merge_cols.append('Meal Hour')
 
-        # Fill unallocated rows
+        df_merged = pd.merge(df_track, df_alloc[merge_cols], on=['Fleet Number', 'Date'], how='left', indicator='MERGE_CHECK')
+
         df_merged['Employee Name'] = df_merged['Employee Name'].fillna('UNALLOCATED')
-        df_merged['Sleep Out'] = df_merged['Sleep Out'].fillna(0)
-        df_merged['Meal Hour'] = df_merged['Meal Hour'].fillna(0)
+        df_merged['Sleep Out'] = pd.to_numeric(df_merged.get('Sleep Out', 0), errors='coerce').fillna(0)
+        df_merged['Meal Hour'] = pd.to_numeric(df_merged.get('Meal Hour', 0), errors='coerce').fillna(0)
 
         if df_merged.empty:
             st.error("No data after processing.")
@@ -209,11 +240,11 @@ if tracking_file and allocation_file:
 
         df_merged['meal_hour'] = df_merged.apply(auto_lunch_deduction, axis=1)
 
-        # Sleep out based on End Location
-        df_merged['SLEEP OUT RAW'] = pd.to_numeric(df_merged.get('Sleep Out', 0), errors='coerce').fillna(0)
-        sleep_data = df_merged.apply(classify_sleep_out, axis=1, result_type='expand')
-        df_merged['sleep_out_local'] = sleep_data[0]
-        df_merged['sleep_out_crossborder'] = sleep_data[1]
+        # Sleep out classification
+        df_merged['SLEEP OUT RAW'] = df_merged['Sleep Out']
+        df_merged['SLEEP OUT TYPE'] = df_merged.apply(classify_sleep_out_type, axis=1)
+        df_merged['sleep_out_local'] = df_merged.apply(lambda r: r['Sleep Out'] if r['SLEEP OUT TYPE'] == 'LOCAL' else 0, axis=1)
+        df_merged['sleep_out_crossborder'] = df_merged.apply(lambda r: r['Sleep Out'] if r['SLEEP OUT TYPE'] == 'XBORDER' else 0, axis=1)
 
         # Yard hours
         if 'Activity Description' in df_merged.columns:
@@ -229,7 +260,7 @@ if tracking_file and allocation_file:
 
         df_merged = df_merged.sort_values(['Employee Name', 'Date', 'Start Time'])
 
-        # ===== 195.03 LOGIC: M-F CAP FIRST =====
+        # ===== 195.03 LOGIC =====
         df_merged['normal_weekday'] = 0.0
         df_merged['normal_sat'] = 0.0
         df_merged['normal_sun'] = 0.0
@@ -242,7 +273,7 @@ if tracking_file and allocation_file:
                 continue
             driver_mask = df_merged['Employee Name'] == driver
 
-            # PASS 1: M-F cap
+            # M-F cap
             mf_mask = driver_mask & (df_merged['weekday'] < 5)
             mf_cumsum = 0.0
             for idx in df_merged[mf_mask].index:
@@ -253,7 +284,7 @@ if tracking_file and allocation_file:
                 df_merged.at[idx, 'ot_weekday'] = ot_today
                 mf_cumsum += normal_today
 
-            # PASS 2: Sat fills remaining
+            # Sat
             normal_remaining = max(0, NORMAL_HOURS_THRESHOLD - mf_cumsum)
             sat_mask = driver_mask & (df_merged['weekday'] == 5)
             for idx in df_merged[sat_mask].index:
@@ -264,7 +295,7 @@ if tracking_file and allocation_file:
                 df_merged.at[idx, 'ot_sat'] = ot_today
                 normal_remaining -= normal_today
 
-            # PASS 3: Sun fills remaining
+            # Sun
             sun_mask = driver_mask & (df_merged['weekday'] == 6)
             for idx in df_merged[sun_mask].index:
                 hours_today = df_merged.at[idx, 'total_hours']
@@ -274,14 +305,12 @@ if tracking_file and allocation_file:
                 df_merged.at[idx, 'ot_sun'] = ot_today
                 normal_remaining -= normal_today
 
-        # Combined OT @1.5
         df_merged['total_ot_15'] = df_merged['ot_weekday'] + df_merged['ot_sat']
 
-        # ===== ABNORMAL TRUCK DAY COUNT =====
+        # ===== SUMMARY =====
         abnormal_days = df_merged[df_merged['is_abnormal'] == True].groupby('Employee Name')['Date'].nunique().reset_index()
         abnormal_days = abnormal_days.rename(columns={'Date': 'ABNORMAL DAYS'})
 
-        # ===== SUMMARY =====
         driver_totals = df_merged.groupby('Employee Name').agg({
             'total_hours': 'sum',
             'normal_weekday': 'sum',
@@ -317,22 +346,30 @@ if tracking_file and allocation_file:
             'sleep_out_crossborder': 'SLEEP OUT XBORDER'
         })
 
-        # Remove unallocated from summary unless needed
         driver_totals = driver_totals[driver_totals['Employee Name']!= 'UNALLOCATED']
 
         st.success(f"Allocated {len(df_merged)} trips to {df_merged['Employee Name'].nunique()} drivers!")
 
         unallocated = df_merged[df_merged['Employee Name'] == 'UNALLOCATED']
         if len(unallocated) > 0:
-            st.warning(f"{len(unallocated)} trips could not be matched to a driver. Check Date + Fleet Number in allocation file.")
+            st.warning(f"{len(unallocated)} trips unallocated. Check Date + Fleet in allocation file.")
+
+        unknown_sleep = len(df_merged[df_merged['SLEEP OUT TYPE'] == 'UNKNOWN'])
+        if unknown_sleep > 0:
+            st.warning(f"{unknown_sleep} trips have SLEEP OUT > 0 but End Location couldn't be read from link. Check tracking file.")
+
+        total_sleep_raw = df_merged['SLEEP OUT RAW'].sum()
+        total_sleep_local = df_merged['sleep_out_local'].sum()
+        total_sleep_xborder = df_merged['sleep_out_crossborder'].sum()
+        st.info(f"Sleep Out Totals: RAW={total_sleep_raw:.0f} | LOCAL={total_sleep_local:.0f} | XBORDER={total_sleep_xborder:.0f} | UNKNOWN={unknown_sleep}")
 
         st.subheader(f"Summary - M-F caps at {NORMAL_HOURS_THRESHOLD}h")
         st.dataframe(driver_totals.round(2))
 
-        st.subheader("All Trips - Check End Location + SLEEP OUT RAW")
-        display_cols = ['Date', 'Employee Name', 'Fleet Number', 'is_abnormal', 'End Location', 'SLEEP OUT RAW', 'MERGE_CHECK', 'weekday', 'Start Time', 'End Time',
+        st.subheader("All Trips - Check SLEEP OUT TYPE + End Location")
+        display_cols = ['Date', 'Employee Name', 'Fleet Number', 'End Location', 'SLEEP OUT RAW', 'SLEEP OUT TYPE', 'weekday',
                        'total_hours', 'normal_weekday', 'normal_sat', 'normal_sun',
-                       'ot_weekday', 'ot_sat', 'ot_sun', 'total_ot_15', 'yard_hours', 'meal_hour',
+                       'ot_weekday', 'ot_sat', 'ot_sun', 'total_ot_15',
                        'sleep_out_local', 'sleep_out_crossborder']
         display_cols = [col for col in display_cols if col in df_merged.columns]
         st.dataframe(df_merged[display_cols].round(2))
@@ -347,16 +384,13 @@ if tracking_file and allocation_file:
                 if driver == 'UNALLOCATED':
                     continue
                 df_driver = df_merged[df_merged['Employee Name'] == driver][display_cols].copy()
-
                 subtotal_data = {col: [''] for col in display_cols}
                 subtotal_data['Date'] = ['TOTAL']
                 subtotal_data['Employee Name'] = [driver]
                 for col in ['total_hours', 'normal_weekday', 'normal_sat', 'normal_sun',
-                           'ot_weekday', 'ot_sat', 'ot_sun', 'total_ot_15', 'yard_hours', 'meal_hour',
-                           'sleep_out_local', 'sleep_out_crossborder']:
+                           'ot_weekday', 'ot_sat', 'ot_sun', 'total_ot_15', 'sleep_out_local', 'sleep_out_crossborder']:
                     if col in df_driver.columns:
                         subtotal_data[col] = [df_driver[col].sum()]
-
                 subtotal = pd.DataFrame(subtotal_data)
                 df_driver_out = pd.concat([df_driver, subtotal], ignore_index=True)
                 sheet_name = re.sub(r'[\\/*?:\[\]]', '', driver)[:31]
@@ -365,7 +399,7 @@ if tracking_file and allocation_file:
         output.seek(0)
 
         st.download_button(
-            "📥 Download Excel - V4.19",
+            "📥 Download Excel - V4.22",
             output,
             "fleet_timesheet_processed.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
