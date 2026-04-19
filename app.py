@@ -19,8 +19,8 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ===== MAIN APP =====
-st.set_page_config(page_title="Fleet Timesheet Processor V2.8", layout="wide")
-st.title("Fleet Timesheet Processor VERSION 2.8 - Verwey Vervoer")
+st.set_page_config(page_title="Fleet Timesheet Processor V2.9", layout="wide")
+st.title("Fleet Timesheet Processor VERSION 2.9 - Verwey Vervoer")
 
 st.markdown("Allocates drivers to Fleet Numbers and calculates **Normal Hours, Overtime @1.5, Yard Hours**.")
 
@@ -40,12 +40,10 @@ with col2:
     allocation_file = st.file_uploader("Verwey format: Sheet = Driver, Has DAY|DATE|FLEET columns", type=["xlsx", "xls"], key="allocation")
 
 def find_header_row(df_raw):
-    # Look for row with Registration Nr and Departure Time
     for idx, row in df_raw.iterrows():
         row_str = ' '.join([str(x).upper() for x in row.values])
         if 'REGISTRATION' in row_str and 'DEPARTURE' in row_str and 'ARRIVAL' in row_str:
             return idx
-        # Or DAY DATE FLEET for allocation
         if 'DAY' in row_str and 'DATE' in row_str and 'FLEET' in row_str:
             return idx
     return 0
@@ -58,7 +56,6 @@ def extract_yard_hours(text):
     return 0.0
 
 def clean_col_name(col):
-    # Remove trailing colons and clean
     return str(col).strip().lower().replace(':', '').replace('.', '').strip()
 
 def standardize_columns(df):
@@ -69,7 +66,7 @@ def standardize_columns(df):
         'start': 'Start Time', 'start time': 'Start Time', 'departure time': 'Start Time', 'first movement': 'Start Time', 'departure': 'Start Time', 'starttime': 'Start Time',
         'end': 'End Time', 'end time': 'End Time', 'arrival time': 'End Time', 'last movement': 'End Time', 'arrival': 'End Time', 'endtime': 'End Time',
         'fleet': 'Fleet Number', 'vehicle': 'Fleet Number', 'truck': 'Fleet Number', 'fleet no': 'Fleet Number', 
-        'reg': 'Fleet Number', 'registration': 'Fleet Number', 'registration nr': 'Fleet Number', 'reg nr': 'Fleet Number', 'fleet number': 'Fleet Number', 'reg no': 'Fleet Number', 'registration nr': 'Fleet Number'
+        'reg': 'Fleet Number', 'registration': 'Fleet Number', 'registration nr': 'Fleet Number', 'reg nr': 'Fleet Number', 'fleet number': 'Fleet Number', 'reg no': 'Fleet Number'
     }
     df.columns = [clean_col_name(col) for col in df.columns]
     for old, new in rename_map.items():
@@ -78,16 +75,26 @@ def standardize_columns(df):
     df = df.loc[:, ~df.columns.duplicated()]
     return df
 
+def parse_date_flexible(date_val):
+    """Handle '21 02 2026' or '2026-02-21' or Excel serial dates"""
+    if pd.isna(date_val):
+        return pd.NaT
+    try:
+        # Try DD MM YYYY with spaces
+        if isinstance(date_val, str) and len(date_val.split()) == 3:
+            return pd.to_datetime(date_val, format='%d %m %Y', errors='coerce')
+        # Try standard parsing
+        return pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+    except:
+        return pd.NaT
+
 if tracking_file and allocation_file:
     try:
         # Read tracking file
         df_track_raw = pd.read_excel(tracking_file, header=None)
         track_header = find_header_row(df_track_raw)
         df_track = pd.read_excel(tracking_file, header=track_header)
-        
-        st.write("**Tracking file raw columns:**", list(df_track.columns))
         df_track = standardize_columns(df_track)
-        st.write("**After standardizing:**", list(df_track.columns))
 
         # Read allocation file - each sheet = one driver
         xls = pd.ExcelFile(allocation_file)
@@ -118,6 +125,10 @@ if tracking_file and allocation_file:
             
         df_alloc = pd.concat(all_alloc_dfs, ignore_index=True)
 
+        # Show RAW allocation data before any processing
+        st.write("**RAW Allocation data before date parsing:**")
+        st.dataframe(df_alloc[['Fleet Number', 'Date']].head(10))
+
         # Create Date from Start Time if tracking file has no Date column
         if 'Date' not in df_track.columns:
             if 'Start Time' in df_track.columns:
@@ -126,17 +137,31 @@ if tracking_file and allocation_file:
                 st.error(f"Tracking file missing both 'Date' and 'Start Time' columns. Found: {list(df_track.columns)}")
                 st.stop()
         
-        # Parse dates
-        df_track['Date'] = pd.to_datetime(df_track['Date'], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
-        df_alloc['Date'] = pd.to_datetime(df_alloc['Date'], errors='coerce', dayfirst=True).dt.strftime('%Y-%m-%d')
+        # Parse dates with flexible function
+        df_track['Date'] = df_track['Date'].apply(parse_date_flexible).dt.strftime('%Y-%m-%d')
+        df_alloc['Date'] = df_alloc['Date'].apply(parse_date_flexible).dt.strftime('%Y-%m-%d')
+        
+        # Show AFTER date parsing
+        st.write("**Allocation data AFTER date parsing:**")
+        st.dataframe(df_alloc[['Fleet Number', 'Date', 'Employee Name']].head(10))
         
         # Standardize Fleet Number
         df_track['Fleet Number'] = df_track['Fleet Number'].astype(str).str.strip().str.upper()
         df_alloc['Fleet Number'] = df_alloc['Fleet Number'].astype(str).str.strip().str.upper()
 
-        # Remove empty rows
+        # Check which rows will be dropped
+        st.write(f"Tracking rows before dropna: {len(df_track)}")
+        st.write(f"Allocation rows before dropna: {len(df_alloc)}")
+        
         df_track = df_track.dropna(subset=['Fleet Number', 'Date', 'Start Time', 'End Time'])
         df_alloc = df_alloc.dropna(subset=['Fleet Number', 'Date'])
+        
+        st.write(f"Tracking rows AFTER dropna: {len(df_track)}")
+        st.write(f"Allocation rows AFTER dropna: {len(df_alloc)}")
+
+        if df_alloc.empty:
+            st.error("Allocation data is empty after cleaning. Check that Date column parses correctly above.")
+            st.stop()
 
         # Check required columns
         required_track = ['Fleet Number', 'Date', 'Start Time', 'End Time']
@@ -154,16 +179,16 @@ if tracking_file and allocation_file:
 
         # Debug view
         with st.expander("Debug: Data being merged", expanded=True):
-            st.write("**Tracking sample:**")
+            st.write("**Tracking:**")
             st.dataframe(df_track[['Fleet Number', 'Date', 'Start Time', 'End Time']].head(10))
-            st.write("**Allocation sample:**")
+            st.write("**Allocation:**")
             st.dataframe(df_alloc[['Fleet Number', 'Date', 'Employee Name']].head(10))
 
         # Merge = allocate driver to fleet number
         df_merged = pd.merge(df_track, df_alloc, on=['Fleet Number', 'Date'], how='inner')
 
         if df_merged.empty:
-            st.error("No matching rows. Check Fleet Number and Date match exactly in debug tables above.")
+            st.error("No matching rows. The Fleet Numbers and Dates above must match exactly.")
             st.stop()
 
         # Extract yard hours if Activity Description exists
