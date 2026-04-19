@@ -4,6 +4,36 @@ from io import BytesIO
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Fleet Timesheet Processor V2.4", layout="wide")
+
+# --- PASSWORD GATE ---
+def check_password():
+    """Returns True if user entered correct password."""
+    
+    def password_entered():
+        if st.session_state["password"] == st.secrets["app_password"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # don't store password
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # First run, show input for password.
+        st.text_input("Password", type="password", on_change=password_entered, key="password")
+        st.caption("This app is private.")
+        return False
+    elif not st.session_state["password_correct"]:
+        # Password not correct, show input + error.
+        st.text_input("Password", type="password", on_change=password_entered, key="password")
+        st.error("😕 Password incorrect")
+        return False
+    else:
+        # Password correct.
+        return True
+
+if not check_password():
+    st.stop()  # Don't run rest of app unless password correct
+
+# --- MAIN APP STARTS HERE ---
 st.title("Fleet Timesheet Processor")
 st.caption("**VERSION 2.4 - Yard Hours + Fleet Number Extraction**")
 
@@ -14,13 +44,10 @@ def extract_fleet_number(text):
     if pd.isna(text):
         return ""
     text = str(text)
-    # Find numbers that are 5 digits, or numbers after keywords like 'Vehicle', 'Truck', 'Fleet'
     import re
-    # Look for 5-digit numbers first - most fleet numbers are 5 digits
     match = re.search(r'\b(\d{5})\b', text)
     if match:
         return match.group(1)
-    # Fallback: any 4-6 digit number
     match = re.search(r'\b(\d{4,6})\b', text)
     if match:
         return match.group(1)
@@ -28,24 +55,13 @@ def extract_fleet_number(text):
 
 def process_timesheet(df):
     df = df.copy()
-    
-    # Standardize column names - adjust these if your Excel headers are different
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
     
-    # Expected columns: date, employee_name, activity_description, start_time, end_time
-    # Rename if needed
     rename_map = {
-        'date': 'date',
-        'employee': 'employee_name',
-        'employee_name': 'employee_name', 
-        'name': 'employee_name',
-        'activity': 'activity_description',
-        'description': 'activity_description',
-        'activity_description': 'activity_description',
-        'start': 'start_time',
-        'start_time': 'start_time',
-        'end': 'end_time',
-        'end_time': 'end_time'
+        'date': 'date', 'employee': 'employee_name', 'employee_name': 'employee_name', 
+        'name': 'employee_name', 'activity': 'activity_description', 'description': 'activity_description',
+        'activity_description': 'activity_description', 'start': 'start_time', 'start_time': 'start_time',
+        'end': 'end_time', 'end_time': 'end_time'
     }
     
     for old, new in rename_map.items():
@@ -58,29 +74,22 @@ def process_timesheet(df):
         st.error(f"Missing required columns: {missing}. Found columns: {list(df.columns)}")
         st.stop()
     
-    # Convert times
     df['start_time'] = pd.to_datetime(df['start_time'], errors='coerce').dt.time
     df['end_time'] = pd.to_datetime(df['end_time'], errors='coerce').dt.time
     df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
-    
-    # Drop rows where time conversion failed
     df = df.dropna(subset=['start_time', 'end_time', 'date'])
     
-    # Calculate hours
     def calc_hours(row):
         start_dt = datetime.combine(datetime.today(), row['start_time'])
         end_dt = datetime.combine(datetime.today(), row['end_time'])
-        if end_dt < start_dt:  # crossed midnight
+        if end_dt < start_dt:
             end_dt += timedelta(days=1)
         delta = end_dt - start_dt
         return round(delta.total_seconds() / 3600, 2)
     
     df['hours'] = df.apply(calc_hours, axis=1)
-    
-    # Extract fleet number
     df['fleet_number'] = df['activity_description'].apply(extract_fleet_number)
     
-    # Flag yard hours - if activity contains 'yard' or similar keywords
     yard_keywords = ['yard', 'workshop', 'depot', 'base']
     df['is_yard'] = df['activity_description'].str.lower().str.contains('|'.join(yard_keywords), na=False)
     df['yard_hours'] = df.apply(lambda r: r['hours'] if r['is_yard'] else 0, axis=1)
@@ -106,7 +115,6 @@ if uploaded_file:
         st.subheader("Processed Data Preview")
         st.dataframe(df_processed.head(20))
         
-        # Summary
         summary = df_processed.groupby('employee_name').agg(
             total_hours=('hours', 'sum'),
             yard_hours=('yard_hours', 'sum'),
@@ -117,7 +125,6 @@ if uploaded_file:
         st.subheader("Summary by Employee")
         st.dataframe(summary)
         
-        # Download button
         excel_data = to_excel(df_processed)
         st.download_button(
             label="📥 Download Processed Excel",
